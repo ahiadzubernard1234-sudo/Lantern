@@ -17,7 +17,7 @@ dependencies:
 
   # Networking
   network_info_plus: ^5.0.0
-  wifi_iot: ^0.3.22
+  wifi_iot: ^0.3.19+3
   multicast_dns: ^0.3.0
 
   # Database
