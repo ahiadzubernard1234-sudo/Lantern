@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:logger/logger.dart';
-import 'network_models.dart';
+import '../models/network_models.dart';
 
 class DiscoveryService {
   static final DiscoveryService _instance = DiscoveryService._internal();

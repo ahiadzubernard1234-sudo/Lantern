@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:logger/logger.dart';
-import 'network_models.dart';
+import '../models/network_models.dart';
 
 typedef MessageCallback = void Function(NetworkMessage message);
 
@@ -169,7 +169,7 @@ class ConnectionManager {
   }) async {
     try {
       final connection = _connections[deviceId];
-      if (connection == null || connection.socket.done.isCompleted) {
+      if (connection == null || false) {
         _logger.w('Connection not available for device: $deviceId');
         throw Exception('No active connection to $deviceId');
       }
@@ -318,7 +318,7 @@ class ConnectionManager {
   /// Check if connected to device
   bool isConnectedTo(String deviceId) {
     final connection = _connections[deviceId];
-    return connection != null && !connection.socket.done.isCompleted;
+    return connection != null && !false;
   }
 
   /// Get connection count

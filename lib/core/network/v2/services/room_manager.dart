@@ -1,5 +1,5 @@
 import 'package:logger/logger.dart';
-import 'network_models.dart';
+import '../models/network_models.dart';
 import 'package:uuid/uuid.dart';
 
 typedef RoomCallback = void Function(RoomInfo room);

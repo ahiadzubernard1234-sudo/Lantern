@@ -92,7 +92,7 @@ class NetworkMonitor {
   /// Get local IP address
   Future<String?> _getLocalIpAddress() async {
     try {
-      for (var interface in NetworkInterface.listSync()) {
+      for (var interface in await NetworkInterface.list()) {
         for (var addr in interface.addresses) {
           if (addr.type == InternetAddressType.IPv4) {
             final ip = addr.address;

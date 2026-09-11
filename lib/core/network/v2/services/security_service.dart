@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:logger/logger.dart';
 import 'package:uuid/uuid.dart';
-import 'network_models.dart';
+import '../models/network_models.dart';
 
 class SecurityService {
   static final SecurityService _instance = SecurityService._internal();

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:logger/logger.dart';
 import 'package:lantern/core/database/database_service.dart';
 import 'package:sqflite/sqflite.dart';
-import 'network_models.dart';
+import '../models/network_models.dart';
 
 typedef MessageReceivedCallback = void Function(NetworkMessage message);
 

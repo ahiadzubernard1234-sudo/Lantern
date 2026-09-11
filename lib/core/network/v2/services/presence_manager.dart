@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:logger/logger.dart';
-import 'network_models.dart';
+import '../models/network_models.dart';
 
 typedef PresenceCallback = void Function(String deviceId, bool isOnline);
 

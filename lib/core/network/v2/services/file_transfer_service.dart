@@ -5,7 +5,7 @@ import 'package:logger/logger.dart';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 import 'package:uuid/uuid.dart';
-import 'network_models.dart';
+import '../models/network_models.dart';
 
 typedef FileTransferCallback = void Function(FileTransferSession session);
 

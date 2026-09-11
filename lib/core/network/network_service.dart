@@ -117,7 +117,7 @@ class NetworkService {
       final peerId = '$ipAddress:$port';
       Socket? socket = _connectedPeers[peerId];
 
-      if (socket == null || socket.done.isCompleted) {
+      if (socket == null) {
         socket = await connectToPeer(ipAddress, port);
       }
 
@@ -137,7 +137,7 @@ class NetworkService {
       }
 
       final address = InternetAddress(broadcastAddress);
-      await _datagramSocket.send(data, address, port);
+      _datagramSocket.send(data, address, port);
       _logger.d('Broadcast packet sent to $broadcastAddress:$port');
     } catch (e) {
       _logger.e('Failed to broadcast discovery packet: $e');
@@ -145,9 +145,9 @@ class NetworkService {
     }
   }
 
-  String? getLocalIPAddress() {
+  Future<String?> getLocalIPAddress() async {
     try {
-      for (var interface in NetworkInterface.listSync()) {
+      for (var interface in await NetworkInterface.list()) {
         for (var addr in interface.addresses) {
           if (addr.type == InternetAddressType.IPv4) {
             final ip = addr.address;
