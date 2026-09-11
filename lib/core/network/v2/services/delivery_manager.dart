@@ -130,7 +130,7 @@ class DeliveryManager {
       );
 
       await sendFunction();
-      _logger.d('ACK sent for message: $messageId');
+      _logger.d('ACK sent for message: ${ack.id}');
     } catch (e) {
       _logger.e('Failed to send ACK for $messageId: $e');
     }

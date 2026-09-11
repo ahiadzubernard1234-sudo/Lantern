@@ -25,8 +25,6 @@ linter:
     - avoid_empty_else
     - avoid_print
     - avoid_relative_lib_imports
-    - avoid_returning_null
-    - avoid_returning_null_for_future
     - avoid_returning_null_for_void
     - avoid_returning_this
     - avoid_slow_async_io
@@ -36,9 +34,6 @@ linter:
     - control_flow_in_finally
     - empty_statements
     - hash_and_equals
-    - invariant_booleans
-    - iterable_contains_unrelated_type
-    - list_remove_unrelated_type
     - literal_only_boolean_expressions
     - no_adjacent_strings_in_list
     - no_duplicate_case_values
@@ -52,7 +47,6 @@ linter:
     - always_put_control_body_on_new_line
     - always_put_required_named_parameters_first
     - annotate_overrides
-    - avoid_bool_logic_in_conditional_expression
     - avoid_classes_with_only_static_members
     - avoid_double_and_int_checks
     - avoid_field_initializers_in_const_classes
@@ -62,7 +56,6 @@ linter:
     - avoid_positional_boolean_parameters
     - avoid_private_typedef_functions
     - avoid_renaming_method_parameters
-    - avoid_returning_boolean_for_future
     - avoid_returning_null_for_void
     - avoid_returning_this
     - avoid_setters_without_getters

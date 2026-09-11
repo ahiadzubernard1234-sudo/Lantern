@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import '../models/network_models.dart';
 import 'package:logger/logger.dart';
 
 typedef NetworkStatusCallback = void Function(NetworkStatus status);
@@ -72,21 +71,6 @@ class NetworkMonitor {
       }
     } catch (e) {
       _logger.e('Error checking network status: $e');
-    }
-  }
-
-  /// Check internet connectivity
-  Future<bool> _checkInternetConnectivity() async {
-    try {
-      // Try to reach Google DNS
-      final result = await InternetAddress.lookup('8.8.8.8').timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => [],
-      );
-
-      return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
-    } catch (e) {
-      return false;
     }
   }
 

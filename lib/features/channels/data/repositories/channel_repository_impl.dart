@@ -7,10 +7,9 @@ import 'package:lantern/features/channels/domain/repositories/channel_repository
 
 class ChannelRepositoryImpl implements ChannelRepository {
   final LocalChannelDatasource _datasource;
-  final NetworkService _networkService;
   final Logger _logger = Logger();
 
-  ChannelRepositoryImpl(this._datasource, this._networkService);
+  ChannelRepositoryImpl(this._datasource, NetworkService _);
 
   @override
   Future<void> createChannel({
@@ -97,10 +96,9 @@ class ChannelRepositoryImpl implements ChannelRepository {
       };
 
       final jsonData = jsonEncode(messageData);
-      final encodedData = utf8.encode(jsonData);
 
       // In a real implementation, send to all members via their IP addresses
-      _logger.d('Channel message sent to ${members.length} members');
+      _logger.d('Channel message sent to ${members.length} members: $jsonData');
     } catch (e) {
       _logger.e('Failed to send channel message: $e');
     }
