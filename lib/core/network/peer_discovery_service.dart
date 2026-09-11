@@ -121,7 +121,7 @@ class PeerDiscoveryService {
       const Duration(seconds: DISCOVERY_INTERVAL_SECONDS),
       (_) async {
         try {
-          final localIp = _networkService.getLocalIPAddress();
+          final localIp = await _networkService.getLocalIPAddress();
           if (localIp == null) return;
 
           final discoveryPacket = {

@@ -145,7 +145,7 @@ class NetworkService {
     }
   }
 
-  String? getLocalIPAddress() {
+  Future<String?> getLocalIPAddress() async {
     try {
       for (final interface in await NetworkInterface.list()) {
         for (var addr in interface.addresses) {
