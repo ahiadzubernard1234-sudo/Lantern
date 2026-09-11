@@ -280,12 +280,12 @@ class DiscoveryService {
   /// Stop discovery service
   Future<void> stopDiscovery() async {
     try {
-      _isRunning = false;
       if (_isRunning) {
         _broadcastTimer.cancel();
         _peerTimeoutTimer.cancel();
-        await _discoverySocket.close();
+        _discoverySocket.close();
       }
+      _isRunning = false;
       _discoveredPeers.clear();
       _listeners.clear();
       _logger.i('Discovery service stopped');

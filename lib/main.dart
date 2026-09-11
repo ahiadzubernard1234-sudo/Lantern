@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/localizations.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lantern/core/di/service_locator.dart';
 import 'package:lantern/features/app/presentation/pages/app_shell.dart';

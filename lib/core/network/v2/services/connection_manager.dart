@@ -168,7 +168,7 @@ class ConnectionManager {
   }) async {
     try {
       final connection = _connections[deviceId];
-      if (connection == null || connection.socket.done.isCompleted) {
+      if (connection == null) {
         _logger.w('Connection not available for device: $deviceId');
         throw Exception('No active connection to $deviceId');
       }
@@ -317,7 +317,7 @@ class ConnectionManager {
   /// Check if connected to device
   bool isConnectedTo(String deviceId) {
     final connection = _connections[deviceId];
-    return connection != null && !connection.socket.done.isCompleted;
+    return connection != null;
   }
 
   /// Get connection count

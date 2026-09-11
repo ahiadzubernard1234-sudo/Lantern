@@ -117,7 +117,7 @@ class NetworkService {
       final peerId = '$ipAddress:$port';
       Socket? socket = _connectedPeers[peerId];
 
-      if (socket == null || socket.done.isCompleted) {
+      if (socket == null) {
         socket = await connectToPeer(ipAddress, port);
       }
 
@@ -147,7 +147,7 @@ class NetworkService {
 
   String? getLocalIPAddress() {
     try {
-      for (var interface in NetworkInterface.listSync()) {
+      for (final interface in await NetworkInterface.list()) {
         for (var addr in interface.addresses) {
           if (addr.type == InternetAddressType.IPv4) {
             final ip = addr.address;
@@ -172,7 +172,7 @@ class NetworkService {
       _receiveBuffers.clear();
       if (_isInitialized) {
         await _serverSocket.close();
-        await _datagramSocket.close();
+        _datagramSocket.close();
       }
       _isInitialized = false;
       _logger.i('Network service closed');
