@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:logger/logger.dart';
-import 'network_models.dart';
+import '../models/network_models.dart';
 
 typedef MessageCallback = void Function(NetworkMessage message);
 

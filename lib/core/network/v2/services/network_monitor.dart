@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import '../models/network_models.dart';
 import 'package:logger/logger.dart';
 
 typedef NetworkStatusCallback = void Function(NetworkStatus status);
@@ -92,7 +93,7 @@ class NetworkMonitor {
   /// Get local IP address
   Future<String?> _getLocalIpAddress() async {
     try {
-      for (var interface in NetworkInterface.listSync()) {
+      for (final interface in await NetworkInterface.list()) {
         for (var addr in interface.addresses) {
           if (addr.type == InternetAddressType.IPv4) {
             final ip = addr.address;
