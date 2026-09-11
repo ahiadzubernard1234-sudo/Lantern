@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:logger/logger.dart';
+import 'package:lantern/core/database/database_service.dart';
+import 'package:sqflite/sqflite.dart';
 import 'network_models.dart';
 
 typedef MessageReceivedCallback = void Function(NetworkMessage message);
@@ -10,6 +12,7 @@ class MessageService {
 
   final List<MessageReceivedCallback> _receivedCallbacks = [];
   final Map<String, List<NetworkMessage>> _messageBuffer = {};
+  final DatabaseService _database = DatabaseService();
 
   factory MessageService() => _instance;
   MessageService._internal();
@@ -56,13 +59,25 @@ class MessageService {
   /// Save message locally (database integration point)
   Future<void> _saveMessageLocally(NetworkMessage message, {required bool sent}) async {
     try {
-      // This would integrate with DatabaseService
-      // For now, buffer messages in memory
       final key = sent ? message.receiverId : message.senderId;
       _messageBuffer.putIfAbsent(key, () => []);
-      _messageBuffer[key]!.add(message);
+      if (!_messageBuffer[key]!.any((m) => m.id == message.id)) {
+        _messageBuffer[key]!.add(message);
+      }
+      await _database.database.insert(
+        'messages',
+        {
+          'id': message.id,
+          'sender_id': message.senderId,
+          'receiver_id': message.receiverId,
+          'content': message.content,
+          'message_type': message.type,
+          'created_at': DateTime.fromMillisecondsSinceEpoch(message.timestamp).toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
 
-      _logger.d('Message buffered for $key');
+      _logger.d('Message persisted for $key');
     } catch (e) {
       _logger.e('Error saving message locally: $e');
     }

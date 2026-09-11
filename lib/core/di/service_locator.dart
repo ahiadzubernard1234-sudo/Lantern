@@ -48,7 +48,7 @@ class ServiceLocator {
 
     // Initialize repositories
     _profileRepository = ProfileRepositoryImpl(_localProfileDatasource);
-    _messageRepository = MessageRepositoryImpl(_localMessageDatasource, _networkService);
+    _messageRepository = MessageRepositoryImpl(_localMessageDatasource, _networkService, _localProfileDatasource);
     _channelRepository = ChannelRepositoryImpl(_localChannelDatasource, _networkService);
   }
 

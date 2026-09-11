@@ -1,5 +1,6 @@
 import 'package:lantern/core/database/database_service.dart';
 import 'package:lantern/features/channels/domain/entities/channel.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 class LocalChannelDatasource {
@@ -20,7 +21,8 @@ class LocalChannelDatasource {
       'name': name,
       'description': description,
       'owner_id': ownerId,
-      'member_count': 1,
+      // The owner is inserted below; start at zero so it is counted once.
+      'member_count': 0,
       'created_at': now.toIso8601String(),
       'updated_at': now.toIso8601String(),
     });
@@ -48,36 +50,39 @@ class LocalChannelDatasource {
   Future<void> addChannelMember(String channelId, String memberId) async {
     final memberId_ = const Uuid().v4();
 
-    try {
-      await _databaseService.database.insert('channel_members', {
+    final inserted = await _databaseService.database.insert(
+      'channel_members',
+      {
         'id': memberId_,
         'channel_id': channelId,
         'member_id': memberId,
         'joined_at': DateTime.now().toIso8601String(),
         'muted': 0,
-      });
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
 
-      // Update member count
+    if (inserted != 0) {
       await _databaseService.database.rawUpdate(
         'UPDATE channels SET member_count = member_count + 1 WHERE id = ?',
         [channelId],
       );
-    } catch (e) {
-      // Member already exists
     }
   }
 
   Future<void> removeChannelMember(String channelId, String memberId) async {
-    await _databaseService.database.delete(
+    final deleted = await _databaseService.database.delete(
       'channel_members',
       where: 'channel_id = ? AND member_id = ?',
       whereArgs: [channelId, memberId],
     );
 
-    await _databaseService.database.rawUpdate(
-      'UPDATE channels SET member_count = MAX(0, member_count - 1) WHERE id = ?',
-      [channelId],
-    );
+    if (deleted > 0) {
+      await _databaseService.database.rawUpdate(
+        'UPDATE channels SET member_count = MAX(0, member_count - 1) WHERE id = ?',
+        [channelId],
+      );
+    }
   }
 
   Future<void> muteChannelMember(String channelId, String memberId) async {

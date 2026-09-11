@@ -11,19 +11,9 @@ final networkCoordinatorProvider =
 /// Discovered peers provider
 final discoveredPeersProvider = StreamProvider<List<PeerInfo>>((ref) async* {
   final coordinator = ref.watch(networkCoordinatorProvider);
-  final completer = Completer<List<PeerInfo>>();
-
-  coordinator.discoveryService.addListener((peers) {
-    if (!completer.isCompleted) {
-      completer.complete(peers);
-    }
-  });
-
-  yield await completer.future;
-
   while (true) {
-    await Future.delayed(const Duration(seconds: 1));
     yield coordinator.discoveryService.getAllPeers();
+    await Future.delayed(const Duration(seconds: 1));
   }
 });
 
@@ -100,12 +90,10 @@ final fileTransfersProvider = Provider<List<FileTransferSession>>((ref) {
 /// Network status provider
 final networkStatusProvider = StreamProvider<NetworkStatus>((ref) async* {
   final coordinator = ref.watch(networkCoordinatorProvider);
-
-  yield coordinator.networkMonitor.getStatus();
-
-  coordinator.networkMonitor.addStatusCallback((status) {
-    // Update will be caught by stream refresh
-  });
+  while (true) {
+    yield coordinator.networkMonitor.getStatus();
+    await Future.delayed(const Duration(seconds: 1));
+  }
 });
 
 /// Local IP provider
@@ -234,9 +222,3 @@ class RoomActionsNotifier extends StateNotifier<AsyncValue<void>> {
     });
   }
 }
-
-// Import for Completer
-import 'dart:async';
-
-// Import for NetworkStatus
-import 'services/network_monitor.dart';

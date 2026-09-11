@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.system);
 
@@ -40,7 +39,7 @@ class AppTheme {
         foregroundColor: lightOnSurface,
         elevation: 0,
         centerTitle: true,
-        titleTextStyle: GoogleFonts.roboto(
+        titleTextStyle: const TextStyle(
           fontSize: 20,
           fontWeight: FontWeight.w600,
           color: lightOnSurface,
@@ -70,7 +69,7 @@ class AppTheme {
           borderSide: const BorderSide(color: primary, width: 2),
         ),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        hintStyle: GoogleFonts.roboto(
+        hintStyle: TextStyle(
           color: Colors.grey.shade600,
           fontSize: 14,
         ),
@@ -81,15 +80,13 @@ class AppTheme {
           foregroundColor: Colors.white,
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          textStyle: GoogleFonts.roboto(
+          textStyle: const TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.w600,
           ),
         ),
       ),
-      textTheme: GoogleFonts.robotoTextTheme(
-        ThemeData.light().textTheme,
-      ),
+      textTheme: ThemeData.light().textTheme,
     );
   }
 
@@ -111,7 +108,7 @@ class AppTheme {
         foregroundColor: darkOnSurface,
         elevation: 0,
         centerTitle: true,
-        titleTextStyle: GoogleFonts.roboto(
+        titleTextStyle: const TextStyle(
           fontSize: 20,
           fontWeight: FontWeight.w600,
           color: darkOnSurface,
@@ -141,7 +138,7 @@ class AppTheme {
           borderSide: const BorderSide(color: primary, width: 2),
         ),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        hintStyle: GoogleFonts.roboto(
+        hintStyle: TextStyle(
           color: Colors.grey.shade400,
           fontSize: 14,
         ),
@@ -152,15 +149,13 @@ class AppTheme {
           foregroundColor: Colors.white,
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          textStyle: GoogleFonts.roboto(
+          textStyle: const TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.w600,
           ),
         ),
       ),
-      textTheme: GoogleFonts.robotoTextTheme(
-        ThemeData.dark().textTheme,
-      ),
+      textTheme: ThemeData.dark().textTheme,
     );
   }
 }

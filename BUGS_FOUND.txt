@@ -1,0 +1,219 @@
+LANtern BUG AUDIT - COMPLETE FINDINGS
+=====================================
+
+Repository audited: LANtern Flutter local-first LAN social hub
+Audit type: Static source/repository audit
+Original source archive: LANtern_prepared_repository.zip
+
+IMPORTANT VERIFICATION NOTE
+---------------------------
+The repair pass below was applied directly to the repository. The execution environment used for this repair does not contain the Flutter/Dart SDK, so `flutter analyze`, `flutter test`, and `flutter build apk` could not be executed locally. The GitHub Actions workflow has therefore been configured to run pub get, analyze, tests, and an Android debug APK build on GitHub's Flutter environment.
+
+BUGS / DEFECTS FOUND AND FIXES
+------------------------------
+
+1. Invalid DatagramSocket type
+   File: lib/core/network/network_service.dart
+   Problem: Declared `DatagramSocket` while binding a `RawDatagramSocket`.
+   Fix: Changed the field type to `RawDatagramSocket`.
+
+2. Missing crypto dependency
+   File: pubspec.yaml / security_service.dart
+   Problem: security_service.dart imported package:crypto/crypto.dart but crypto was absent from pubspec.yaml.
+   Fix: Added crypto dependency.
+
+3. Missing dart:async import in network providers
+   File: lib/core/network/v2/providers/network_providers.dart
+   Problem: Completer/Future functionality was used without the required import, and imports were incorrectly placed at the bottom of the Dart file.
+   Fix: Moved imports to the top and removed the unnecessary Completer implementation.
+
+4. Broken/incomplete Android native project
+   Problem: AndroidManifest referenced MainActivity, PeerDiscoveryService, NetworkStateReceiver, LaunchTheme and launcher resources that were absent.
+   Fix: Added a valid Flutter MainActivity, LaunchTheme, launch background resource, and simplified the manifest to only declare implemented components.
+
+5. Missing Roboto font assets
+   Problem: pubspec declared TTF files that did not exist.
+   Fix: Removed the nonexistent font declarations and changed the theme to use Flutter/system text styles.
+
+6. Unnecessary Google Fonts dependency for a local-first app
+   Problem: google_fonts could require runtime network access and was unnecessary for the app to build.
+   Fix: Removed google_fonts dependency and usage.
+
+7. Two competing networking stacks
+   Problem: V1 networking and V2 networking both existed while the application was partly wired to V1 and V2.
+   Fix: V2 is now initialized from AppShell after a real local profile exists. V1 remains available for legacy repository compatibility, but V2 is the primary network runtime.
+
+8. V2 coordinator was never initialized
+   Problem: NetworkServiceCoordinator.initialize() existed but was never called by the app.
+   Fix: AppShell now initializes the coordinator using the persisted profile's device ID, username and device name.
+
+9. TCP message framing bug
+   Problem: TCP was treated as a message-oriented transport. A single JSON packet could be split across reads or multiple packets could arrive in one read.
+   Fix: Added a 4-byte length-prefixed TCP frame format with receive buffering and frame draining. V1 outbound TCP now uses the same framing format.
+
+10. File transfer amplified TCP framing failures
+    Problem: Base64 file chunks inside JSON could become very large and were vulnerable to the same TCP stream-boundary problem.
+    Fix: V2 file messages now use the framed TCP transport and a 1 MiB maximum frame size.
+
+11. Security token was generated but not actually used for authentication
+    Problem: SecurityService created a token, but packet validation never authenticated packets with it.
+    Fix: Packet validation was tightened for structure, timestamp, replay ID and size. NOTE: cryptographic peer authentication/encryption is still a future security architecture item and is NOT claimed to be solved by the token generator.
+
+12. Replay protection accepted future timestamps
+    Problem: Old packets were rejected but sufficiently future-dated packets were not.
+    Fix: Validation now rejects timestamps outside the +/- 5 minute replay window.
+
+13. Replay cache cleanup was not time-based
+    Problem: Message IDs were stored in a Set and periodically trimmed by arbitrary count rather than packet age.
+    Fix: Replaced with ID -> seen timestamp map and cleanup based on the replay window, with a hard upper bound.
+
+14. Discovery packet metadata was trusted/cast unsafely
+    Problem: Malformed metadata could cause runtime type errors.
+    Fix: Discovery now validates metadata types before constructing PeerInfo.
+
+15. Discovery first broadcast never actually happened
+    Problem: _sendDiscoveryPacket() returned immediately because _isRunning was set only after the first send.
+    Fix: Discovery marks itself running before the initial broadcast.
+
+16. Discovery stop could touch uninitialized late fields
+    Problem: stopDiscovery could cancel/close late-initialized resources even when discovery was not running.
+    Fix: Stop logic now checks running state before closing resources.
+
+17. Network status incorrectly required internet access
+    Problem: NetworkMonitor tried to reach 8.8.8.8 and could mark the app offline even when LAN connectivity existed.
+    Fix: LAN connectivity is now based on presence of a usable local IPv4 address, not internet reachability.
+
+18. Network provider listener leak / ineffective stream
+    Problem: discoveredPeersProvider installed a callback and then separately polled, without disposing the callback. networkStatusProvider also ended after one event.
+    Fix: Providers now use bounded periodic streams without accumulating unmanaged listeners.
+
+19. Coordinator accessed a private PresenceManager field
+    Problem: network_coordinator.dart referenced presenceManager._trackers from another library file.
+    Fix: Coordinator now uses the public initializePeer() API.
+
+20. Heartbeat timers were not tracked
+    Problem: Timer.periodic heartbeat timers could survive longer than their connection lifecycle.
+    Fix: Heartbeat timers are stored and cancelled on disconnect/removal/shutdown.
+
+21. Socket stream subscriptions were not tracked
+    Problem: ConnectionManager did not retain subscriptions for deterministic cleanup.
+    Fix: Added subscription tracking and cleanup.
+
+22. Connection receive buffers were missing
+    Problem: TCP partial frames could not be reconstructed.
+    Fix: Added per-connection receive buffers.
+
+23. Connection shutdown cleanup was incomplete
+    Problem: Connections, timers, subscriptions and buffers could remain alive.
+    Fix: shutdown/disconnect paths now cancel timers/subscriptions, clear buffers and close sockets.
+
+24. Incoming connections had no protocol-size guard
+    Problem: An invalid/huge TCP length could consume resources or break the parser.
+    Fix: Added a 1 MiB maximum frame length and invalid-length rejection.
+
+25. File path traversal risk
+    File: file_transfer_service.dart
+    Problem: A network-controlled filename was directly joined to the output directory.
+    Fix: Filenames are reduced to safe basenames and paths are normalized/checked before writing.
+
+26. Duplicate file chunks corrupted progress
+    Problem: receivedChunks was incremented for every packet, including duplicate chunk indexes.
+    Fix: Added a per-session Set<int> of received chunk indexes.
+
+27. File chunk indexes were insufficiently validated
+    Problem: Negative/out-of-range indexes could be accepted.
+    Fix: Session and chunk metadata are type-checked and chunk indexes are bounded.
+
+28. File chunk sizes were not validated
+    Problem: A peer could send a chunk of an unexpected size.
+    Fix: Expected chunk size is calculated and compared before writing.
+
+29. File integrity was not verified
+    Problem: Reconstructed files had no final hash verification.
+    Fix: SHA-256 hash is generated for outgoing transfers, sent in metadata, and verified when a transfer completes.
+
+30. Zero-byte file transfers divided by zero / had zero chunks
+    Problem: Progress/statistics could divide by zero and the receiver could never complete a zero-byte transfer.
+    Fix: Zero-byte transfers are represented explicitly and statistics guard against zero chunk counts.
+
+31. File transfer sender loop was missing
+    Problem: startTransfer() created a session, but no complete chunk iteration/send operation existed in FileTransferService.
+    Fix: Added sendTransfer() to iterate all chunks through a caller-supplied network send callback, including zero-byte transfers.
+
+32. Database had no file transfer table
+    Problem: Transfer state could not be persisted.
+    Fix: Added file_transfers table and index.
+
+33. Database migrations were empty
+    Problem: Schema changes would not be applied to existing installations.
+    Fix: Added versioned migrations and bumped the database version.
+
+34. Message foreign keys conflicted with remote device IDs
+    Problem: messages.sender_id/receiver_id referenced local profiles even though remote peers are represented by device IDs.
+    Fix: Rebuilt the message table during migration without the incorrect profile foreign keys. Channel message sender IDs were treated similarly.
+
+35. V2 messages were only held in memory
+    Problem: Messages disappeared when the process/app stopped.
+    Fix: V2 MessageService now persists messages into SQLite while retaining an in-memory cache for UI access.
+
+36. Direct-message repository used an empty current-user ID
+    Problem: getAllConversations() and clearConversation() passed currentUserId: ''.
+    Fix: Repository now resolves the persisted local profile and uses its ID.
+
+37. Profile/device ID was timestamp-based
+    Problem: Device IDs generated from milliseconds could collide and were predictable.
+    Fix: Profile creation now uses UUID v4 device IDs.
+
+38. Channel creation UI was fake
+    Problem: Create Channel only displayed a success SnackBar and did not create a database record.
+    Fix: UI now calls the channel repository, persists the channel, refreshes the list, and reports failures.
+
+39. Channels UI was only a placeholder
+    Problem: Existing channels were never displayed.
+    Fix: ChannelsTab now loads and displays persisted channels.
+
+40. Peer UI was only a placeholder
+    Problem: Peer discovery data was not displayed.
+    Fix: PeersTab now consumes the discoveredPeersProvider and displays discovered devices.
+
+41. Channel message network delivery was only a log/comment
+    Problem: ChannelRepositoryImpl encoded a message but never sent it to members.
+    Fix status: The misleading implementation was identified. A complete cross-device channel protocol requires a canonical device-ID/contact mapping and peer persistence. This is documented as an architecture item rather than pretending the old code performed network delivery.
+
+42. Android release build was signed with debug keys
+    Problem: build.gradle used signingConfigs.debug for release builds.
+    Fix status: CI now builds a DEBUG APK for automatic testing/artifacts. Production release signing should be added with a private keystore stored in GitHub Secrets before distributing a release build.
+
+43. Android manifest contained obsolete/unnecessary permissions/components
+    Problem: GET_TASKS, GET_PACKAGE_SIZE and old storage permissions/components were present without corresponding functionality.
+    Fix: Removed obsolete device permissions and undeclared services/receivers. Kept core LAN/Wi-Fi permissions and POST_NOTIFICATIONS/NEARBY_WIFI_DEVICES declarations.
+
+44. No automated tests
+    Problem: No test suite existed.
+    Fix: Added initial network-model round-trip and security/replay tests, and CI now runs flutter test.
+
+45. CI workflow built a misleading 'release' APK
+    Problem: Workflow called flutter build apk --release while Android release signing was debug-key based.
+    Fix: Workflow now runs analyze + tests and builds an explicit debug APK artifact. Production release signing can be layered on later using GitHub Secrets.
+
+KNOWN SECURITY / NETWORK LIMITATIONS AFTER THE REPAIR
+------------------------------------------------------
+These are NOT presented as solved because solving them correctly requires a deliberate protocol design:
+
+A. Peer authentication is not cryptographically established. Discovery metadata can still be spoofed on a hostile LAN.
+B. Network messages are not end-to-end encrypted. Do not treat LAN isolation as cryptographic security.
+C. Broadcast address calculation still assumes a common /24 network. A subnet-aware implementation is recommended for arbitrary LANs.
+D. Some Android hotspots/APs may block broadcast or client-to-client traffic. mDNS/manual discovery/fallback transport may be needed.
+E. Production release signing is not configured because no private keystore should be embedded in the repository.
+F. Full cross-device channel synchronization still needs a canonical channel protocol and persistent peer/contact mapping.
+
+RECOMMENDED NEXT STEP
+---------------------
+Push the repaired project to GitHub. The included GitHub Actions workflow will run:
+  1. flutter pub get
+  2. flutter analyze
+  3. flutter test
+  4. flutter build apk --debug
+  5. Upload app-debug.apk as a workflow artifact
+
+Then test the APK on two real Android phones connected to the same hotspot/Wi-Fi. Real LAN discovery and socket behavior cannot be fully validated by GitHub's build runner.

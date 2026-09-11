@@ -9,6 +9,7 @@ class DiscoveryService {
   final Logger _logger = Logger();
 
   late RawDatagramSocket _discoverySocket;
+  StreamSubscription<RawSocketEvent>? _socketSubscription;
   late Timer _broadcastTimer;
   late Timer _peerTimeoutTimer;
 
@@ -52,7 +53,7 @@ class DiscoveryService {
       _logger.i('Discovery socket bound to port $DISCOVERY_PORT');
 
       // Listen for incoming discovery packets
-      _discoverySocket.listen(
+      _socketSubscription = _discoverySocket.listen(
         (RawSocketEvent event) {
           if (event == RawSocketEvent.read) {
             try {
@@ -69,6 +70,8 @@ class DiscoveryService {
           _logger.e('Discovery socket error: $error');
         },
       );
+
+      _isRunning = true;
 
       // Send first discovery packet immediately
       await _sendDiscoveryPacket();
@@ -91,7 +94,6 @@ class DiscoveryService {
         (_) => _removeStalePeers(),
       );
 
-      _isRunning = true;
       _logger.i('Discovery service started');
     } catch (e) {
       _logger.e('Failed to start discovery: $e');
@@ -145,8 +147,8 @@ class DiscoveryService {
       final metadata = packet.metadata;
       if (metadata == null) return;
 
-      final deviceId = metadata['deviceId'] as String?;
-      if (deviceId == null || deviceId.isEmpty) return;
+      final deviceId = metadata['deviceId'];
+      if (deviceId is! String || deviceId.isEmpty) return;
 
       // Ignore own discovery packets
       if (deviceId == _currentDeviceId) {
@@ -156,10 +158,10 @@ class DiscoveryService {
       // Create or update peer
       final peer = PeerInfo(
         deviceId: deviceId,
-        username: metadata['username'] ?? 'Unknown',
-        deviceName: metadata['deviceName'] ?? 'Unknown Device',
-        ipAddress: metadata['ipAddress'] ?? datagram.address.address,
-        port: metadata['port'] ?? 15555,
+        username: metadata['username'] is String ? metadata['username'] as String : 'Unknown',
+        deviceName: metadata['deviceName'] is String ? metadata['deviceName'] as String : 'Unknown Device',
+        ipAddress: metadata['ipAddress'] is String ? metadata['ipAddress'] as String : datagram.address.address,
+        port: metadata['port'] is int ? metadata['port'] as int : 15555,
         lastSeen: DateTime.now().millisecondsSinceEpoch,
         isOnline: true,
       );
@@ -279,10 +281,14 @@ class DiscoveryService {
   /// Stop discovery service
   Future<void> stopDiscovery() async {
     try {
-      _isRunning = false;
-      _broadcastTimer.cancel();
-      _peerTimeoutTimer.cancel();
-      await _discoverySocket.close();
+      if (_isRunning) {
+        _broadcastTimer.cancel();
+        _peerTimeoutTimer.cancel();
+        await _socketSubscription?.cancel();
+        _socketSubscription = null;
+        _discoverySocket.close();
+        _isRunning = false;
+      }
       _discoveredPeers.clear();
       _listeners.clear();
       _logger.i('Discovery service stopped');

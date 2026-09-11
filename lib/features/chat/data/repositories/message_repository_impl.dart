@@ -5,14 +5,16 @@ import 'package:lantern/core/network/network_service.dart';
 import 'package:lantern/features/chat/data/datasources/local_message_datasource.dart';
 import 'package:lantern/features/chat/domain/entities/message.dart';
 import 'package:lantern/features/chat/domain/repositories/message_repository.dart';
+import 'package:lantern/features/profile/data/datasources/local_profile_datasource.dart';
 import 'package:uuid/uuid.dart';
 
 class MessageRepositoryImpl implements MessageRepository {
   final LocalMessageDatasource _datasource;
   final NetworkService _networkService;
   final Logger _logger = Logger();
+  final LocalProfileDatasource? _profileDatasource;
 
-  MessageRepositoryImpl(this._datasource, this._networkService);
+  MessageRepositoryImpl(this._datasource, this._networkService, [this._profileDatasource]);
 
   @override
   Future<void> sendMessage({
@@ -110,13 +112,16 @@ class MessageRepositoryImpl implements MessageRepository {
 
   @override
   Future<List<Message>> getConversation(String peerId) async {
-    return _datasource.getConversation(peerId);
+    final profile = await _profileDatasource?.getProfile();
+    if (profile == null) return const [];
+    return _datasource.getConversation(peerId, currentUserId: profile.id);
   }
 
   @override
   Future<List<Conversation>> getAllConversations() async {
-    // Current user ID would come from profile provider
-    return _datasource.getAllConversations(currentUserId: '');
+    final profile = await _profileDatasource?.getProfile();
+    if (profile == null) return const [];
+    return _datasource.getAllConversations(currentUserId: profile.id);
   }
 
   @override
@@ -136,7 +141,9 @@ class MessageRepositoryImpl implements MessageRepository {
 
   @override
   Future<void> clearConversation(String peerId) async {
-    return _datasource.clearConversation(peerId, currentUserId: '');
+    final profile = await _profileDatasource?.getProfile();
+    if (profile == null) return;
+    return _datasource.clearConversation(peerId, currentUserId: profile.id);
   }
 
   String _getMessageType(String fileName) {

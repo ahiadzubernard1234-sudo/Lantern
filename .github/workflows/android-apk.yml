@@ -3,6 +3,7 @@ name: Android APK
 on:
   push:
     branches: ["**"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -31,13 +32,16 @@ jobs:
       - name: Analyze
         run: flutter analyze
 
-      - name: Build release APK
-        run: flutter build apk --release
+      - name: Run tests
+        run: flutter test
+
+      - name: Build debug APK
+        run: flutter build apk --debug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lantern-release-apk-${{ github.sha }}
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: lantern-debug-apk-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
           retention-days: 14

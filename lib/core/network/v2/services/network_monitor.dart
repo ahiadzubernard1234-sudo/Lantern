@@ -53,10 +53,10 @@ class NetworkMonitor {
   /// Check current network status
   Future<void> _checkNetworkStatus() async {
     try {
-      final hasInternetConnection = await _checkInternetConnectivity();
       final newIpAddress = await _getLocalIpAddress();
 
-      final newStatus = hasInternetConnection
+      // LANtern is local-first: internet access is not required.
+      final newStatus = newIpAddress != null
           ? NetworkStatus.connected
           : NetworkStatus.offline;
 

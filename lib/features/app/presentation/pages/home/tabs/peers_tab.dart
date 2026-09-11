@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lantern/core/network/v2/providers/network_providers.dart';
 
 class PeersTab extends ConsumerStatefulWidget {
   const PeersTab({Key? key}) : super(key: key);
@@ -51,25 +52,30 @@ class _PeersTabState extends ConsumerState<PeersTab> {
           style: Theme.of(context).textTheme.titleMedium,
         ),
         const SizedBox(height: 8),
-        // Placeholder for online users list
-        Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 32),
-            child: Column(
-              children: [
-                Icon(
-                  Icons.people_outline,
-                  size: 48,
-                  color: Colors.grey.shade400,
+        ref.watch(discoveredPeersProvider).when(
+          loading: () => const Center(child: Padding(
+            padding: EdgeInsets.all(32),
+            child: CircularProgressIndicator(),
+          )),
+          error: (error, _) => Center(child: Text('Discovery error: $error')),
+          data: (peers) {
+            if (peers.isEmpty) {
+              return Center(child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 32),
+                child: Text('No users discovered yet', style: TextStyle(color: Colors.grey.shade600)),
+              ));
+            }
+            return Column(
+              children: peers.map((peer) => Card(
+                child: ListTile(
+                  leading: CircleAvatar(child: Text(peer.username.isEmpty ? '?' : peer.username[0].toUpperCase())),
+                  title: Text(peer.username),
+                  subtitle: Text('${peer.deviceName} • ${peer.ipAddress}:${peer.port}'),
+                  trailing: Icon(peer.isOnline ? Icons.circle : Icons.circle_outlined, size: 12),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'No users discovered yet',
-                  style: TextStyle(color: Colors.grey.shade600),
-                ),
-              ],
-            ),
-          ),
+              )).toList(),
+            );
+          },
         ),
       ],
     );

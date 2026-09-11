@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:logger/logger.dart';
+import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as path;
 import 'package:uuid/uuid.dart';
 import 'network_models.dart';
 
@@ -13,6 +15,8 @@ class FileTransferService {
 
   final Map<String, FileTransferSession> _transfers = {};
   final List<FileTransferCallback> _callbacks = [];
+  final Map<String, Set<int>> _receivedChunkIndexes = {};
+  final Map<String, String> _expectedHashes = {};
 
   static const int CHUNK_SIZE = 65536; // 64KB chunks
 
@@ -33,7 +37,8 @@ class FileTransferService {
 
       final fileSize = await file.length();
       final fileName = file.path.split('/').last;
-      final totalChunks = (fileSize / CHUNK_SIZE).ceil();
+      final totalChunks = fileSize == 0 ? 0 : (fileSize / CHUNK_SIZE).ceil();
+      final fileHash = sha256.convert(await file.readAsBytes()).toString();
 
       final sessionId = const Uuid().v4();
 
@@ -51,12 +56,44 @@ class FileTransferService {
       );
 
       _transfers[sessionId] = session;
+      _expectedHashes[sessionId] = fileHash;
       _logger.i('File transfer started: $fileName ($fileSize bytes)');
       _notifyTransfer(session);
 
       return session;
     } catch (e) {
       _logger.e('Failed to start file transfer: $e');
+      rethrow;
+    }
+  }
+
+  /// Send every chunk using the supplied network callback.
+  Future<void> sendTransfer({
+    required FileTransferSession session,
+    required String filePath,
+    required Future<void> Function(NetworkMessage message) send,
+  }) async {
+    try {
+      if (session.totalChunks == 0) {
+        final packet = createTransferPacket(
+          session: session,
+          chunkIndex: 0,
+          chunkData: const <int>[],
+        );
+        await send(packet);
+        return;
+      }
+      for (var index = 0; index < session.totalChunks; index++) {
+        final chunk = await readChunk(filePath: filePath, chunkIndex: index);
+        final packet = createTransferPacket(
+          session: session,
+          chunkIndex: index,
+          chunkData: chunk,
+        );
+        await send(packet);
+      }
+    } catch (e) {
+      await cancelTransfer(session.sessionId);
       rethrow;
     }
   }
@@ -108,6 +145,7 @@ class FileTransferService {
         'totalChunks': session.totalChunks,
         'chunkIndex': chunkIndex,
         'chunkSize': chunkData.length,
+        'fileHash': _expectedHashes[session.sessionId],
       },
     );
   }
@@ -121,13 +159,14 @@ class FileTransferService {
       final metadata = message.metadata;
       if (metadata == null) return;
 
-      final sessionId = metadata['sessionId'] as String?;
-      final chunkIndex = metadata['chunkIndex'] as int?;
-      final fileName = metadata['fileName'] as String?;
-      final fileSize = metadata['fileSize'] as int?;
-      final totalChunks = metadata['totalChunks'] as int?;
+      final sessionId = metadata['sessionId'];
+      final chunkIndex = metadata['chunkIndex'];
+      final fileName = metadata['fileName'];
+      final fileSize = metadata['fileSize'];
+      final totalChunks = metadata['totalChunks'];
+      final fileHash = metadata['fileHash'];
 
-      if (sessionId == null || chunkIndex == null || fileName == null) {
+      if (sessionId is! String || sessionId.isEmpty || chunkIndex is! int || chunkIndex < 0 || fileName is! String || fileName.isEmpty) {
         _logger.w('Invalid file transfer metadata');
         return;
       }
@@ -137,34 +176,88 @@ class FileTransferService {
       if (session == null) {
         session = FileTransferSession(
           sessionId: sessionId,
-          fileName: fileName,
-          fileSize: fileSize ?? 0,
+          fileName: path.basename(fileName),
+          fileSize: fileSize is int ? fileSize : 0,
           senderDeviceId: message.senderId,
           receiverDeviceId: message.receiverId,
-          totalChunks: totalChunks ?? 0,
+          totalChunks: totalChunks is int && totalChunks >= 0 ? totalChunks : 0,
           receivedChunks: 0,
           progress: 0.0,
           isComplete: false,
           isFailed: false,
         );
         _transfers[sessionId] = session;
+        _receivedChunkIndexes[sessionId] = <int>{};
+        if (fileHash is String && fileHash.length == 64) _expectedHashes[sessionId] = fileHash;
+      }
+
+      final received = _receivedChunkIndexes.putIfAbsent(sessionId, () => <int>{});
+      if (received.contains(chunkIndex)) {
+        _logger.d('Ignoring duplicate chunk $chunkIndex for $sessionId');
+        return;
+      }
+      if (session.totalChunks == 0) {
+        if (chunkIndex != 0 || message.content.isNotEmpty) return;
+        final filePath = path.join(path.normalize(outputDirectory), path.basename(fileName));
+        final file = File(filePath);
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes(const <int>[], flush: true);
+        final completed = FileTransferSession(
+          sessionId: session.sessionId,
+          fileName: session.fileName,
+          fileSize: 0,
+          senderDeviceId: session.senderDeviceId,
+          receiverDeviceId: session.receiverDeviceId,
+          totalChunks: 0,
+          receivedChunks: 0,
+          progress: 1.0,
+          isComplete: true,
+          isFailed: false,
+        );
+        _transfers[sessionId] = completed;
+        _notifyTransfer(completed);
+        return;
+      }
+      if (chunkIndex >= session.totalChunks) {
+        _logger.w('Invalid chunk index $chunkIndex for $sessionId');
+        return;
       }
 
       // Decode chunk data
       final chunkData = base64Decode(message.content);
 
       // Write to file
-      final filePath = '$outputDirectory/$fileName';
+      final safeFileName = path.basename(fileName);
+      if (safeFileName != fileName || safeFileName == '.' || safeFileName == '..') {
+        _logger.w('Rejected unsafe file name: $fileName');
+        return;
+      }
+      final outputDir = path.normalize(outputDirectory);
+      final filePath = path.join(outputDir, safeFileName);
+      final relativePath = path.relative(filePath, from: outputDir);
+      if (relativePath == '..' || relativePath.startsWith('..${path.separator}')) {
+        _logger.w('Rejected file path outside output directory');
+        return;
+      }
       final file = File(filePath);
+      await file.parent.create(recursive: true);
+      final expectedChunkSize = chunkIndex == session.totalChunks - 1
+          ? (session.fileSize - (chunkIndex * CHUNK_SIZE)).clamp(0, CHUNK_SIZE)
+          : CHUNK_SIZE;
+      if (chunkData.length != expectedChunkSize) {
+        _logger.w('Invalid chunk size ${chunkData.length}, expected $expectedChunkSize');
+        return;
+      }
       final raf = await file.open(mode: FileMode.write);
       await raf.setPosition(chunkIndex * CHUNK_SIZE);
       await raf.writeFrom(chunkData);
       await raf.close();
 
       // Update session
-      final newReceivedChunks = session.receivedChunks + 1;
+      received.add(chunkIndex);
+      final newReceivedChunks = received.length;
       final progress = (newReceivedChunks / session.totalChunks).clamp(0.0, 1.0);
-      final isComplete = newReceivedChunks >= session.totalChunks;
+      final isComplete = newReceivedChunks == session.totalChunks;
 
       final updatedSession = FileTransferSession(
         sessionId: session.sessionId,
@@ -185,7 +278,16 @@ class FileTransferService {
       _logger.d('Chunk received: $chunkIndex/$totalChunks (${(progress * 100).toStringAsFixed(1)}%)');
 
       if (isComplete) {
-        _logger.i('File transfer complete: $fileName');
+        final expectedHash = _expectedHashes[sessionId];
+        if (expectedHash != null) {
+          final actualHash = sha256.convert(await file.readAsBytes()).toString();
+          if (actualHash != expectedHash) {
+            _logger.e('File integrity check failed for $fileName');
+            await cancelTransfer(sessionId);
+            return;
+          }
+        }
+        _logger.i('File transfer complete: $safeFileName');
       }
     } catch (e) {
       _logger.e('Failed to handle file chunk: $e');
@@ -259,6 +361,8 @@ class FileTransferService {
 
     for (final sessionId in toRemove) {
       _transfers.remove(sessionId);
+      _receivedChunkIndexes.remove(sessionId);
+      _expectedHashes.remove(sessionId);
     }
 
     _logger.d('Cleaned up ${toRemove.length} completed transfers');
@@ -274,7 +378,7 @@ class FileTransferService {
       'active': active.length,
       'completed': completed.length,
       'failed': failed.length,
-      'totalTransferred': active.fold<int>(0, (sum, t) => sum + (t.fileSize * t.receivedChunks ~/ t.totalChunks)),
+      'totalTransferred': active.fold<int>(0, (sum, t) => sum + (t.totalChunks == 0 ? 0 : (t.fileSize * t.receivedChunks ~/ t.totalChunks))),
     };
   }
 }

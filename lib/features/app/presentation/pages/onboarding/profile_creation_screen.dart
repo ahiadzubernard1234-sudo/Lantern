@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lantern/features/profile/presentation/providers/profile_provider.dart';
 import 'dart:io';
+import 'package:uuid/uuid.dart';
 
 class ProfileCreationScreen extends ConsumerStatefulWidget {
   const ProfileCreationScreen({Key? key}) : super(key: key);
@@ -56,13 +57,11 @@ class _ProfileCreationScreenState extends ConsumerState<ProfileCreationScreen> {
         );
       }
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  String _generateDeviceId() {
-    return '${DateTime.now().millisecondsSinceEpoch}';
-  }
+  String _generateDeviceId() => const Uuid().v4();
 
   @override
   Widget build(BuildContext context) {

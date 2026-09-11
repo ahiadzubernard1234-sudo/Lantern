@@ -10,7 +10,7 @@ class SecurityService {
 
   late String _deviceToken;
   late String _localDeviceId;
-  final Set<String> _seenMessageIds = {};
+  final Map<String, DateTime> _seenMessageIds = {};
 
   static const int TOKEN_LENGTH = 32;
   static const int MESSAGE_REPLAY_WINDOW_SECONDS = 300; // 5 minutes
@@ -23,7 +23,7 @@ class SecurityService {
     try {
       _localDeviceId = deviceId;
       _deviceToken = _generateDeviceToken();
-      _logger.i('Security service initialized with token: ${_deviceToken.substring(0, 8)}...');
+      _logger.i('Security service initialized');
     } catch (e) {
       _logger.e('Failed to initialize security service: $e');
       rethrow;
@@ -63,18 +63,19 @@ class SecurityService {
       // Check timestamp is within range
       final now = DateTime.now().millisecondsSinceEpoch;
       final messageAge = now - message.timestamp;
-      if (messageAge > MESSAGE_REPLAY_WINDOW_SECONDS * 1000) {
-        _logger.w('Invalid packet: message too old (${messageAge}ms)');
+      final windowMs = MESSAGE_REPLAY_WINDOW_SECONDS * 1000;
+      if (messageAge.abs() > windowMs) {
+        _logger.w('Invalid packet: timestamp outside replay window (${messageAge}ms)');
         return false;
       }
 
       // Check for replay attacks
-      if (_seenMessageIds.contains(message.id)) {
+      if (_seenMessageIds.containsKey(message.id)) {
         _logger.w('Invalid packet: duplicate message ID (replay attack?)');
         return false;
       }
 
-      _seenMessageIds.add(message.id);
+      _seenMessageIds[message.id] = DateTime.now();
       return true;
     } catch (e) {
       _logger.e('Error validating packet: $e');
@@ -123,11 +124,13 @@ class SecurityService {
 
   /// Clean old message IDs to prevent memory leak
   void cleanupOldMessageIds() {
-    // Keep only recent message IDs (last 1000)
-    if (_seenMessageIds.length > 1000) {
-      final toRemove = _seenMessageIds.length - 1000;
-      _seenMessageIds.removeWhere((_) => toRemove-- > 0);
-      _logger.d('Cleaned up old message IDs');
+    final cutoff = DateTime.now().subtract(const Duration(seconds: MESSAGE_REPLAY_WINDOW_SECONDS));
+    _seenMessageIds.removeWhere((_, seenAt) => seenAt.isBefore(cutoff));
+    if (_seenMessageIds.length > 5000) {
+      final entries = _seenMessageIds.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
+      for (final entry in entries.take(_seenMessageIds.length - 5000)) {
+        _seenMessageIds.remove(entry.key);
+      }
     }
   }
 

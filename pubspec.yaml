@@ -32,7 +32,6 @@ dependencies:
   flutter_localizations:
     sdk: flutter
   cupertino_icons: ^1.0.0
-  google_fonts: ^6.1.0
 
   # File handling
   file_picker: ^6.1.0
@@ -44,6 +43,7 @@ dependencies:
   cached_network_image: ^3.3.0
   image: ^4.1.0
   equatable: ^2.0.0
+  crypto: ^3.0.3
 
   # Logging
   logger: ^2.0.0
@@ -60,12 +60,3 @@ flutter:
   assets:
     - assets/images/
     - assets/avatars/
-
-  fonts:
-    - family: Roboto
-      fonts:
-        - asset: assets/fonts/Roboto-Regular.ttf
-        - asset: assets/fonts/Roboto-Bold.ttf
-          weight: 700
-        - asset: assets/fonts/Roboto-Italic.ttf
-          style: italic

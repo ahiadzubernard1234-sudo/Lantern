@@ -6,9 +6,10 @@ class NetworkService {
   final Logger _logger = Logger();
 
   late ServerSocket _serverSocket;
-  late DatagramSocket _datagramSocket;
+  late RawDatagramSocket _datagramSocket;
 
-  Map<String, Socket> _connectedPeers = {};
+  final Map<String, Socket> _connectedPeers = {};
+  final Map<String, List<int>> _receiveBuffers = {};
   bool _isInitialized = false;
 
   factory NetworkService() {
@@ -57,16 +58,30 @@ class NetworkService {
 
     socket.listen(
       (List<int> data) {
-        _logger.d('Received data from $peerId: ${data.length} bytes');
-        // Data will be processed by listeners
+        final buffer = _receiveBuffers.putIfAbsent(peerId, () => <int>[]);
+        buffer.addAll(data);
+        while (buffer.length >= 4) {
+          final length = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+          if (length <= 0 || length > 1024 * 1024) {
+            _logger.w('Invalid TCP frame from $peerId');
+            socket.destroy();
+            return;
+          }
+          if (buffer.length < length + 4) return;
+          final payload = buffer.sublist(4, 4 + length);
+          buffer.removeRange(0, length + 4);
+          _logger.d('Received framed data from $peerId: ${payload.length} bytes');
+        }
       },
       onError: (error) {
         _logger.e('Socket error for $peerId: $error');
         _connectedPeers.remove(peerId);
+        _receiveBuffers.remove(peerId);
       },
       onDone: () {
         _logger.d('Connection closed from $peerId');
         _connectedPeers.remove(peerId);
+        _receiveBuffers.remove(peerId);
         socket.close();
       },
     );
@@ -85,6 +100,18 @@ class NetworkService {
     }
   }
 
+  List<int> _frame(List<int> payload) {
+    final length = payload.length;
+    if (length > 1024 * 1024) throw ArgumentError('Message exceeds 1 MiB');
+    return [
+      (length >> 24) & 0xff,
+      (length >> 16) & 0xff,
+      (length >> 8) & 0xff,
+      length & 0xff,
+      ...payload,
+    ];
+  }
+
   Future<void> sendMessageToPeer(String ipAddress, int port, List<int> data) async {
     try {
       final peerId = '$ipAddress:$port';
@@ -94,7 +121,7 @@ class NetworkService {
         socket = await connectToPeer(ipAddress, port);
       }
 
-      socket.add(data);
+      socket.add(_frame(data));
       await socket.flush();
       _logger.d('Message sent to $peerId');
     } catch (e) {
@@ -142,8 +169,11 @@ class NetworkService {
         await socket.close();
       }
       _connectedPeers.clear();
-      await _serverSocket.close();
-      await _datagramSocket.close();
+      _receiveBuffers.clear();
+      if (_isInitialized) {
+        await _serverSocket.close();
+        await _datagramSocket.close();
+      }
       _isInitialized = false;
       _logger.i('Network service closed');
     } catch (e) {

@@ -11,8 +11,12 @@ class ConnectionManager {
   final Logger _logger = Logger();
 
   late ServerSocket _serverSocket;
+  StreamSubscription<Socket>? _serverSubscription;
   final Map<String, _PeerConnection> _connections = {};
   final List<MessageCallback> _messageCallbacks = [];
+  final Map<String, StreamSubscription<List<int>>> _subscriptions = {};
+  final Map<String, Timer> _heartbeatTimers = {};
+  final Map<String, List<int>> _receiveBuffers = {};
 
   bool _isInitialized = false;
   String? _localDeviceId;
@@ -40,7 +44,7 @@ class ConnectionManager {
       _logger.i('TCP server listening on port $SERVER_PORT');
 
       // Accept incoming connections
-      _serverSocket.listen(
+      _serverSubscription = _serverSocket.listen(
         (Socket clientSocket) {
           _handleIncomingConnection(clientSocket);
         },
@@ -70,38 +74,22 @@ class ConnectionManager {
       isOutgoing: false,
     );
 
-    socket.listen(
+    final subscription = socket.listen(
       (List<int> data) {
-        try {
-          final message = NetworkMessage.decode(data);
-          _logger.d('Message received from $remoteAddress: ${message.type}');
-
-          // Update connection metadata if handshake
-          if (message.type == MessageType.discovery) {
-            final deviceId = message.metadata?['deviceId'] as String?;
-            if (deviceId != null) {
-              connection.remoteDeviceId = deviceId;
-              _connections[deviceId] = connection;
-              _logger.d('Connection established with device: $deviceId');
-            }
-          }
-
-          // Notify listeners
-          _notifyMessageCallbacks(message);
-        } catch (e) {
-          _logger.w('Error processing incoming data: $e');
-        }
+        _receiveBuffers.putIfAbsent(remoteAddress, () => <int>[]).addAll(data);
+        _drainFrames(socket, connection, remoteAddress);
       },
       onError: (error) {
         _logger.e('Socket error for $remoteAddress: $error');
-        connection.remoteDeviceId?.let((id) => _connections.remove(id));
+        _removeConnection(connection);
       },
       onDone: () {
         _logger.d('Connection closed from $remoteAddress');
-        connection.remoteDeviceId?.let((id) => _connections.remove(id));
+        _removeConnection(connection);
       },
       cancelOnError: true,
     );
+    _subscriptions[remoteAddress] = subscription;
   }
 
   /// Connect to a peer
@@ -148,29 +136,24 @@ class ConnectionManager {
         deviceId: deviceId,
       );
 
-      // Listen for incoming messages
-      socket.listen(
+      final remoteAddress = '$ipAddress:$port';
+      final subscription = socket.listen(
         (List<int> data) {
-          try {
-            final message = NetworkMessage.decode(data);
-            _logger.d('Message from $deviceId: ${message.type}');
-            _notifyMessageCallbacks(message);
-          } catch (e) {
-            _logger.w('Error decoding message from $deviceId: $e');
-          }
+          _receiveBuffers.putIfAbsent(remoteAddress, () => <int>[]).addAll(data);
+          _drainFrames(socket, connection, remoteAddress);
         },
         onError: (error) {
           _logger.e('Connection error with $deviceId: $error');
-          _connections.remove(deviceId);
+          _removeConnection(connection);
         },
         onDone: () {
           _logger.d('Connection closed with $deviceId');
-          _connections.remove(deviceId);
+          _removeConnection(connection);
         },
         cancelOnError: true,
       );
+      _subscriptions[remoteAddress] = subscription;
 
-      // Start heartbeat
       _startHeartbeat(deviceId);
     } catch (e) {
       _logger.e('Failed to connect to $ipAddress:$port: $e');
@@ -191,7 +174,7 @@ class ConnectionManager {
         throw Exception('No active connection to $deviceId');
       }
 
-      connection.socket.add(message.encode());
+      connection.socket.add(_frame(message.encode()));
       await connection.socket.flush();
 
       _logger.d('Message sent to $deviceId (${message.type})');
@@ -202,13 +185,70 @@ class ConnectionManager {
     }
   }
 
+  static const int _maxFrameSize = 1024 * 1024;
+
+  List<int> _frame(List<int> payload) {
+    if (payload.length > _maxFrameSize) {
+      throw ArgumentError('Message exceeds $_maxFrameSize bytes');
+    }
+    return [
+      (payload.length >> 24) & 0xff,
+      (payload.length >> 16) & 0xff,
+      (payload.length >> 8) & 0xff,
+      payload.length & 0xff,
+      ...payload,
+    ];
+  }
+
+  void _drainFrames(Socket socket, _PeerConnection connection, String remoteAddress) {
+    final buffer = _receiveBuffers[remoteAddress]!;
+    while (buffer.length >= 4) {
+      final length = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+      if (length <= 0 || length > _maxFrameSize) {
+        _logger.w('Invalid frame length from $remoteAddress: $length');
+        _removeConnection(connection);
+        return;
+      }
+      if (buffer.length < length + 4) return;
+      final payload = buffer.sublist(4, 4 + length);
+      buffer.removeRange(0, 4 + length);
+      try {
+        final message = NetworkMessage.decode(payload);
+        _logger.d('Message received from $remoteAddress: ${message.type}');
+        if (message.type == MessageType.discovery) {
+          final deviceId = message.metadata?['deviceId'];
+          if (deviceId is String && deviceId.isNotEmpty) {
+            connection.remoteDeviceId = deviceId;
+            _connections[deviceId] = connection;
+          }
+        }
+        _notifyMessageCallbacks(message);
+      } catch (e) {
+        _logger.w('Error decoding frame from $remoteAddress: $e');
+      }
+    }
+  }
+
+  void _removeConnection(_PeerConnection connection) {
+    final id = connection.remoteDeviceId;
+    if (id != null && identical(_connections[id]?.socket, connection.socket)) {
+      _connections.remove(id);
+      _heartbeatTimers.remove(id)?.cancel();
+    }
+    _subscriptions.remove(connection.remoteAddress)?.cancel();
+    _receiveBuffers.remove(connection.remoteAddress);
+    connection.socket.destroy();
+  }
+
   /// Send heartbeat to peer
   void _startHeartbeat(String deviceId) {
-    Timer.periodic(
+    _heartbeatTimers[deviceId]?.cancel();
+    _heartbeatTimers[deviceId] = Timer.periodic(
       const Duration(seconds: HEARTBEAT_INTERVAL_SECONDS),
       (timer) async {
         if (!_connections.containsKey(deviceId)) {
           timer.cancel();
+          _heartbeatTimers.remove(deviceId);
           return;
         }
 
@@ -226,6 +266,7 @@ class ConnectionManager {
         } catch (e) {
           _logger.w('Heartbeat failed for $deviceId: $e');
           timer.cancel();
+          _heartbeatTimers.remove(deviceId);
         }
       },
     );
@@ -236,6 +277,9 @@ class ConnectionManager {
     try {
       final connection = _connections[deviceId];
       if (connection != null) {
+        _heartbeatTimers.remove(deviceId)?.cancel();
+        _subscriptions.remove(connection.remoteAddress)?.cancel();
+        _receiveBuffers.remove(connection.remoteAddress);
         await connection.socket.close();
         _connections.remove(deviceId);
         _logger.i('Disconnected from $deviceId');
@@ -283,13 +327,21 @@ class ConnectionManager {
   /// Shutdown connection manager
   Future<void> shutdown() async {
     try {
-      // Close all peer connections
+      for (final timer in _heartbeatTimers.values) {
+        timer.cancel();
+      }
+      _heartbeatTimers.clear();
+      for (final sub in _subscriptions.values) {
+        await sub.cancel();
+      }
+      _subscriptions.clear();
+      await _serverSubscription?.cancel();
+      _serverSubscription = null;
+      _receiveBuffers.clear();
       for (final deviceId in _connections.keys.toList()) {
         await disconnectPeer(deviceId);
       }
-
-      // Close server socket
-      await _serverSocket.close();
+      if (_isInitialized) await _serverSocket.close();
       _isInitialized = false;
       _logger.i('Connection manager shutdown');
     } catch (e) {
@@ -311,13 +363,4 @@ class _PeerConnection {
     required this.isOutgoing,
     this.remoteDeviceId,
   });
-}
-
-/// Extension for null-safe let
-extension NullableExtension<T> on T? {
-  void let(Function(T) block) {
-    if (this != null) {
-      block(this as T);
-    }
-  }
 }

@@ -3,12 +3,34 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lantern/features/profile/presentation/providers/profile_provider.dart';
 import 'package:lantern/features/app/presentation/pages/onboarding/profile_creation_screen.dart';
 import 'package:lantern/features/app/presentation/pages/home/home_screen.dart';
+import 'package:lantern/core/network/v2/network_coordinator.dart';
 
-class AppShell extends ConsumerWidget {
+class AppShell extends ConsumerStatefulWidget {
   const AppShell({Key? key}) : super(key: key);
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AppShell> createState() => _AppShellState();
+}
+
+class _AppShellState extends ConsumerState<AppShell> {
+  bool _networkStarted = false;
+
+  Future<void> _startNetworkIfNeeded(profile) async {
+    if (_networkStarted || !mounted) return;
+    _networkStarted = true;
+    try {
+      await NetworkServiceCoordinator().initialize(
+        deviceId: profile.deviceId,
+        username: profile.username,
+        deviceName: profile.deviceName,
+      );
+    } catch (_) {
+      _networkStarted = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final profileState = ref.watch(profileNotifierProvider);
 
     return profileState.when(
@@ -16,6 +38,7 @@ class AppShell extends ConsumerWidget {
         if (profile == null) {
           return const ProfileCreationScreen();
         }
+        _startNetworkIfNeeded(profile);
         return const HomeScreen();
       },
       loading: () => const _LoadingScreen(),

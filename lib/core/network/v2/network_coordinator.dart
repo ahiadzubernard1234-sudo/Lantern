@@ -97,12 +97,10 @@ class NetworkServiceCoordinator {
     // Presence manager receives heartbeats
     discoveryService.addListener((peers) {
       for (final peer in peers) {
-        if (!presenceManager._trackers.containsKey(peer.deviceId)) {
-          presenceManager.initializePeer(
-            deviceId: peer.deviceId,
-            username: peer.username,
-          );
-        }
+        presenceManager.initializePeer(
+          deviceId: peer.deviceId,
+          username: peer.username,
+        );
         presenceManager.recordHeartbeat(peer.deviceId);
       }
     });
@@ -305,7 +303,7 @@ class NetworkServiceCoordinator {
   /// Shutdown all services
   Future<void> shutdown() async {
     try {
-      _maintenanceTimer.cancel();
+      if (_initialized) _maintenanceTimer.cancel();
 
       await discoveryService.stopDiscovery();
       await connectionManager.shutdown();
