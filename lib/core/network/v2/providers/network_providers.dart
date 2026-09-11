@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/network_models.dart';
 import '../network_coordinator.dart';
+import '../services/network_monitor.dart';
 
 /// Network coordinator singleton provider
 final networkCoordinatorProvider =

@@ -172,7 +172,7 @@ class NetworkService {
       _receiveBuffers.clear();
       if (_isInitialized) {
         await _serverSocket.close();
-        await _datagramSocket.close();
+        _datagramSocket.close();
       }
       _isInitialized = false;
       _logger.i('Network service closed');

@@ -226,7 +226,7 @@ class PeerDiscoveryService {
       _isDiscovering = false;
       _discoveryBroadcastTimer?.cancel();
       _peerTimeoutTimer?.cancel();
-      await _discoverySocket.close();
+      _discoverySocket.close();
       _discoveredPeers.clear();
       _logger.i('Peer discovery stopped');
     } catch (e) {
