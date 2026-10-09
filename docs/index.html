@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lantern — Chat without the internet</title>
+<style>
+:root{--bg:#0b0d12;--fg:#f4efe6;--mut:#9a968c;--card:#151922;--line:#262b38;--acc:#ffb43a;--acc2:#ff7a2f;--glow:rgba(255,180,58,.22);box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0d12}}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#fbf6ec;--fg:#1b1710;--mut:#6b6557;--card:#fff;--line:#eadfca;--acc:#d9820b;--acc2:#c24e10;--glow:rgba(217,130,11,.18)}}
+:root[data-theme="dark"]{--bg:#0b0d12;--fg:#f4efe6;--mut:#9a968c;--card:#151922;--line:#262b38;--acc:#ffb43a;--acc2:#ff7a2f;--glow:rgba(255,180,58,.22)}
+:root[data-theme="light"]{--bg:#fbf6ec;--fg:#1b1710;--mut:#6b6557;--card:#fff;--line:#eadfca;--acc:#d9820b;--acc2:#c24e10;--glow:rgba(217,130,11,.18)}
+html{scroll-padding-top:env(safe-area-inset-top,0px);scroll-behavior:smooth}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.55;overflow-x:hidden}
+a{color:inherit}
+.wrap{max-width:980px;margin:0 auto;padding:0 20px}
+nav{position:fixed;top:0;left:0;right:0;z-index:10;padding:calc(10px + env(safe-area-inset-top,0px)) 20px 10px;display:flex;justify-content:space-between;align-items:center;backdrop-filter:blur(10px);background:color-mix(in srgb,var(--bg) 70%,transparent)}
+.logo{font-weight:800;letter-spacing:.02em;display:flex;gap:8px;align-items:center}
+.flame{width:14px;height:20px;background:linear-gradient(var(--acc),var(--acc2));border-radius:50% 50% 50% 50%/65% 65% 35% 35%;box-shadow:0 0 18px var(--acc);animation:fl 2.4s ease-in-out infinite}
+@keyframes fl{0%,100%{transform:scale(1) rotate(-2deg)}50%{transform:scale(1.08,.94) rotate(2deg)}}
+.btn{display:inline-block;padding:12px 22px;border-radius:999px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#1b1000;font-weight:700;text-decoration:none;border:0;font-size:1rem;cursor:pointer;transition:transform .2s,box-shadow .2s}
+.btn:hover{transform:translateY(-2px);box-shadow:0 8px 28px var(--glow)}
+.btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.sm{padding:8px 16px;font-size:.9rem}
+.nav-actions{display:flex;align-items:center;gap:10px}
+.theme-btn{width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--fg);font-size:1.1rem;cursor:pointer;transition:transform .2s,border-color .2s}
+.theme-btn:hover{transform:rotate(-12deg);border-color:var(--acc)}
+.quick{display:flex;gap:7px;flex-wrap:wrap;padding:0 2px 4px}
+.quick button{border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--mut);padding:6px 10px;font:inherit;font-size:.76rem;cursor:pointer;transition:.2s}
+.quick button:hover,.quick button:focus-visible{color:var(--fg);border-color:var(--acc);background:var(--glow)}
+.status-note{font-size:.78rem;color:var(--mut);min-height:1.2em;margin:8px 4px 0}
+button:focus-visible,a:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--acc);outline-offset:3px}
+header{position:relative;min-height:100vh;min-height:100svh;display:flex;align-items:center;text-align:center;overflow:hidden}
+#net{position:absolute;inset:0;width:100%;height:100%}
+header .wrap{position:relative;z-index:2;pointer-events:none}
+header .btn{pointer-events:auto}
+.orb{position:absolute;left:50%;top:50%;width:520px;height:520px;max-width:120vw;transform:translate(-50%,-50%);background:radial-gradient(circle,var(--glow),transparent 65%);animation:br 5s ease-in-out infinite;z-index:1;pointer-events:none}
+@keyframes br{50%{transform:translate(-50%,-50%) scale(1.15);opacity:.7}}
+.tag{display:inline-block;padding:6px 14px;border:1px solid var(--line);border-radius:999px;color:var(--mut);font-size:.85rem;margin-bottom:18px}
+h1{font-size:clamp(2.4rem,9vw,5rem);line-height:1.04;margin:0 0 16px;letter-spacing:-.03em}
+h1 span{background:linear-gradient(135deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{color:var(--mut);font-size:clamp(1rem,2.6vw,1.2rem);max-width:540px;margin:0 auto 28px}
+.hint{margin-top:26px;color:var(--mut);font-size:.82rem}
+section{padding:90px 0}
+h2{font-size:clamp(1.7rem,5vw,2.6rem);letter-spacing:-.02em;margin:0 0 10px}
+.sub{color:var(--mut);max-width:520px;margin:0 0 36px}
+.demo{display:grid;gap:36px;grid-template-columns:1fr;align-items:center}
+@media(min-width:820px){.demo{grid-template-columns:1fr 330px}}
+.phone{width:100%;max-width:330px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:34px;padding:14px;box-shadow:0 30px 80px var(--glow)}
+.top{display:flex;justify-content:space-between;align-items:center;padding:6px 8px 12px;border-bottom:1px solid var(--line);font-size:.85rem}
+.chip{display:flex;gap:6px;align-items:center;color:var(--mut)}
+.dot{width:8px;height:8px;border-radius:50%;background:#3ddc84;box-shadow:0 0 8px #3ddc84}
+#chat{height:300px;overflow-y:auto;padding:12px 4px;display:flex;flex-direction:column;gap:8px}
+.m{max-width:80%;padding:9px 13px;border-radius:16px;font-size:.92rem;animation:pop .35s cubic-bezier(.2,1.4,.4,1)}
+@keyframes pop{from{opacity:0;transform:translateY(10px) scale(.9)}}
+.m.in{align-self:flex-start;background:var(--line)}
+.m.out{align-self:flex-end;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#1b1000}
+.m small{display:block;opacity:.6;font-size:.7rem;margin-bottom:2px}
+.typing{align-self:flex-start;display:flex;gap:4px;padding:12px 14px;background:var(--line);border-radius:16px}
+.typing i{width:6px;height:6px;border-radius:50%;background:var(--mut);animation:tp 1s infinite}
+.typing i:nth-child(2){animation-delay:.15s}.typing i:nth-child(3){animation-delay:.3s}
+@keyframes tp{50%{transform:translateY(-4px);opacity:.4}}
+form{display:flex;gap:8px;margin-top:8px}
+input[type=text]{flex:1;min-width:0;padding:11px 14px;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font-size:16px}
+.ctl{display:flex;flex-direction:column;gap:18px}
+.tog{display:flex;align-items:center;gap:14px;padding:16px;border:1px solid var(--line);border-radius:18px;background:var(--card);cursor:pointer;user-select:none}
+.sw{width:52px;height:30px;border-radius:99px;background:var(--line);position:relative;transition:.3s;flex:none}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:var(--fg);transition:.3s}
+.tog.off .sw{background:var(--acc)}.tog.off .sw::after{left:25px;background:#1b1000}
+.tog b{display:block}.tog span.d{color:var(--mut);font-size:.88rem}
+.steps,.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.card{padding:24px;border:1px solid var(--line);border-radius:22px;background:var(--card);transition:transform .25s,border-color .25s,box-shadow .25s}
+.card:hover{transform:translateY(-5px);border-color:var(--acc);box-shadow:0 14px 40px var(--glow)}
+.card .n{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:var(--glow);color:var(--acc);font-weight:800;margin-bottom:12px}
+.card h3{margin:0 0 6px}.card p{margin:0;color:var(--mut);font-size:.95rem}
+.rv{opacity:0;transform:translateY(28px);transition:opacity .7s,transform .7s}
+.rv.on{opacity:1;transform:none}
+.cta{text-align:center;position:relative}
+.cta .box{padding:56px 20px;border-radius:32px;border:1px solid var(--line);background:radial-gradient(ellipse at 50% 0,var(--glow),var(--card) 70%)}
+footer{padding:30px 20px;text-align:center;color:var(--mut);font-size:.85rem}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.rv{opacity:1;transform:none}html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<nav><div class="logo"><i class="flame"></i>Lantern</div><div class="nav-actions"><button class="theme-btn" id="theme" type="button" aria-label="Switch to light theme" title="Switch theme">☾</button><a class="btn sm" href="#get">Get the app</a></div></nav>
+
+<header>
+<canvas id="net"></canvas><div class="orb"></div>
+<div class="wrap">
+<div class="tag">Offline · Peer-to-peer · Android</div>
+<h1>Chat without<br>the <span>internet.</span></h1>
+<p class="lead">Lantern lets phones on the same local network message each other directly. No data. No sign-up. No signal needed.</p>
+<a class="btn" href="#demo">See it glow</a>
+<p class="hint">✦ Touch or move across the screen to light up the network</p>
+</div>
+</header>
+
+<section id="demo"><div class="wrap">
+<h2 class="rv">Turn the internet off.<br>Keep talking.</h2>
+<p class="sub rv">Flip the switch and send a message. Lantern doesn't care.</p>
+<div class="demo rv">
+<div class="ctl">
+<div class="tog" id="tog" role="switch" aria-checked="false" tabindex="0"><div class="sw"></div><div><b id="tt">Internet: ON</b><span class="d" id="td">Tap to cut the connection</span></div></div>
+<div class="card"><h3>Try it</h3><p>Type a message in the phone and watch it travel across the local network to your peers.</p></div>
+</div>
+<div class="phone">
+<div class="top"><b>Lantern · Room</b><span class="chip"><i class="dot"></i><span id="peers">3 peers nearby</span></span></div>
+<div id="chat" aria-live="polite" aria-label="Demo conversation"></div>
+<div class="quick" aria-label="Try a sample message"><button type="button" data-message="Anyone got the notes?">Ask for notes</button><button type="button" data-message="Meet by the gate in five?">Make a plan</button><button type="button" data-message="Can you hear me without data?">Test offline</button></div>
+<form id="f"><input id="i" type="text" placeholder="Message nearby peers…" autocomplete="off"><button class="btn sm" type="submit">Send</button></form><p class="status-note" id="status" aria-live="polite">Demo ready · messages stay in this preview</p>
+</div>
+</div>
+</div></section>
+
+<section><div class="wrap">
+<h2 class="rv">How it works</h2>
+<p class="sub rv">Three steps. Zero servers.</p>
+<div class="steps">
+<div class="card rv"><div class="n">1</div><h3>Join a network</h3><p>Connect to the same Wi-Fi or a phone hotspot. Internet is optional.</p></div>
+<div class="card rv"><div class="n">2</div><h3>Peers appear</h3><p>Lantern finds the other phones around you on the local network.</p></div>
+<div class="card rv"><div class="n">3</div><h3>Just talk</h3><p>Messages go straight from phone to phone. Nothing leaves the room.</p></div>
+</div></div></section>
+
+<section><div class="wrap">
+<h2 class="rv">Built for where signal isn't.</h2>
+<p class="sub rv">Classrooms, campuses, events, power cuts, road trips.</p>
+<div class="grid">
+<div class="card rv"><h3>🔦 Works offline</h3><p>No mobile data, no cloud, no waiting on a network provider.</p></div>
+<div class="card rv"><h3>⚡ Direct & fast</h3><p>Phone-to-phone over your local network keeps messages quick.</p></div>
+<div class="card rv"><h3>🔒 Stays local</h3><p>No account and no central server holding your chats.</p></div>
+<div class="card rv"><h3>🪶 Lightweight</h3><p>Made with Flutter for Android, kept simple on purpose.</p></div>
+</div></div></section>
+
+<section class="cta" id="get"><div class="wrap"><div class="box rv">
+<h2>Light up your local network.</h2>
+<p class="sub" style="margin:0 auto 24px">Grab Lantern and start a conversation that needs nothing but the people around you.</p>
+<a class="btn" href="https://github.com/ahiadzubernard1234-sudo/Lantern" target="_blank" rel="noopener">Get Lantern for Android</a>
+</div></div></section>
+<footer>© 2026 Lantern · Made in Ghana 🇬🇭</footer>
+
+<script>
+(function(){
+var css=function(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()};
+var reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
+/* network canvas */
+var c=document.getElementById('net'),x=c.getContext('2d'),W,H,N=[],P={x:-999,y:-999,on:false},R=[],dpr=Math.min(devicePixelRatio||1,2);
+function size(){var r=c.getBoundingClientRect();W=r.width;H=r.height;c.width=W*dpr;c.height=H*dpr;x.setTransform(dpr,0,0,dpr,0,0);var n=Math.round(Math.min(60,W*H/14000));N=[];for(var i=0;i<n;i++)N.push({x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.35,vy:(Math.random()-.5)*.35,g:0})}
+size();addEventListener('resize',size);
+function pt(e){var r=c.getBoundingClientRect(),t=e.touches?e.touches[0]:e;P.x=t.clientX-r.left;P.y=t.clientY-r.top;P.on=true}
+addEventListener('pointermove',pt);addEventListener('touchmove',pt,{passive:true});
+addEventListener('pointerdown',function(e){pt(e);R.push({x:P.x,y:P.y,r:0})});
+addEventListener('pointerleave',function(){P.on=false});
+function frame(){
+x.clearRect(0,0,W,H);var a=css('--acc'),L=130;
+for(var i=0;i<N.length;i++){var n=N[i];
+if(!reduce){n.x+=n.vx;n.y+=n.vy;if(n.x<0||n.x>W)n.vx*=-1;if(n.y<0||n.y>H)n.vy*=-1;}
+if(P.on){var dx=P.x-n.x,dy=P.y-n.y,d=Math.hypot(dx,dy);if(d<170){n.x+=dx*.006;n.y+=dy*.006;n.g=Math.max(n.g,1-d/170)}}
+n.g*=.96}
+for(i=0;i<R.length;i++){var r=R[i];r.r+=5;for(var k=0;k<N.length;k++){if(Math.abs(Math.hypot(N[k].x-r.x,N[k].y-r.y)-r.r)<14)N[k].g=1}
+x.strokeStyle=a;x.globalAlpha=Math.max(0,.5-r.r/700);x.beginPath();x.arc(r.x,r.y,r.r,0,7);x.stroke();if(r.r>700){R.splice(i,1);i--}}
+for(i=0;i<N.length;i++){for(var j=i+1;j<N.length;j++){var d2=Math.hypot(N[i].x-N[j].x,N[i].y-N[j].y);if(d2<L){x.globalAlpha=(1-d2/L)*(.18+Math.max(N[i].g,N[j].g)*.7);x.strokeStyle=a;x.lineWidth=1;x.beginPath();x.moveTo(N[i].x,N[i].y);x.lineTo(N[j].x,N[j].y);x.stroke()}}
+if(P.on){var dp=Math.hypot(N[i].x-P.x,N[i].y-P.y);if(dp<170){x.globalAlpha=(1-dp/170)*.8;x.strokeStyle=a;x.beginPath();x.moveTo(N[i].x,N[i].y);x.lineTo(P.x,P.y);x.stroke()}}}
+for(i=0;i<N.length;i++){x.globalAlpha=.5+N[i].g*.5;x.fillStyle=a;x.shadowColor=a;x.shadowBlur=6+N[i].g*18;x.beginPath();x.arc(N[i].x,N[i].y,2+N[i].g*3,0,7);x.fill()}
+x.shadowBlur=0;x.globalAlpha=1;requestAnimationFrame(frame)}
+frame();
+/* chat demo */
+var chat=document.getElementById('chat'),form=document.getElementById('f'),inp=document.getElementById('i'),tog=document.getElementById('tog'),off=false,status=document.getElementById('status');
+/* theme control */
+var themeBtn=document.getElementById('theme'),savedTheme=localStorage.getItem('lantern-theme');
+function setTheme(theme){document.documentElement.setAttribute('data-theme',theme);localStorage.setItem('lantern-theme',theme);var light=theme==='light';themeBtn.textContent=light?'☀':'☾';themeBtn.setAttribute('aria-label','Switch to '+(light?'dark':'light')+' theme');themeBtn.title='Switch to '+(light?'dark':'light')+' theme'}
+setTheme(savedTheme||((matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'));
+themeBtn.addEventListener('click',function(){setTheme(document.documentElement.getAttribute('data-theme')==='light'?'dark':'light')});
+function add(t,cls,who){var d=document.createElement('div');d.className='m '+cls;d.innerHTML=(who?'<small>'+who+'</small>':'')+'';d.appendChild(document.createTextNode(t));chat.appendChild(d);chat.scrollTop=chat.scrollHeight}
+function typing(ms,cb){var t=document.createElement('div');t.className='typing';t.innerHTML='<i></i><i></i><i></i>';chat.appendChild(t);chat.scrollTop=chat.scrollHeight;setTimeout(function(){t.remove();cb()},ms)}
+var who=['Ama','Kofi','Esi'],rep=['Got it, no signal here either 😄','Loud and clear!','Lantern just works.','Same hotspot, same room. Love it.','Nice. Sending the notes now.'],ri=0;
+function replyFor(message){var m=message.toLowerCase();if(m.includes('note'))return 'I have them! Sending them over now.';if(m.includes('meet')||m.includes('gate'))return 'Sounds good. See you there in five!';if(m.includes('offline')||m.includes('data')||m.includes('hear'))return 'Yep — message received, no internet needed.';return rep[ri%rep.length]}
+document.querySelectorAll('[data-message]').forEach(function(b){b.addEventListener('click',function(){inp.value=b.getAttribute('data-message');inp.focus();form.requestSubmit()})});
+var seed=[['Ama','Is anyone on data?','in'],['Kofi','Nope. Lantern is all we need.','in']];
+function boot(){seed.forEach(function(s,i){setTimeout(function(){add(s[1],s[2],s[0])},700+i*1300)})}
+var started=false;new IntersectionObserver(function(e,o){if(e[0].isIntersecting&&!started){started=true;boot()}},{threshold:.4}).observe(chat);
+form.addEventListener('submit',function(e){e.preventDefault();var v=inp.value.trim();if(!v)return;add(v,'out');inp.value='';var w=who[ri%3];status.textContent='Sending over the local network…';typing(1100,function(){var answer=replyFor(v);add(answer,'in',w);ri++;status.textContent='Delivered nearby · internet '+(off?'off':'on')})});
+function flip(){off=!off;tog.classList.toggle('off',off);tog.setAttribute('aria-checked',off);document.getElementById('tt').textContent='Internet: '+(off?'OFF':'ON');document.getElementById('td').textContent=off?'Still delivering. Try sending.':'Tap to cut the connection';document.getElementById('peers').textContent='3 peers nearby';if(off)add('Internet is off. Lantern is still connected.','in','Lantern');status.textContent=off?'Internet off · local chat still connected':'Internet on · local chat ready'}
+tog.addEventListener('click',flip);tog.addEventListener('keydown',function(e){if(e.key===' '||e.key==='Enter'){e.preventDefault();flip()}});
+/* reveal */
+var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('on');io.unobserve(e.target)}})},{threshold:.15});
+document.querySelectorAll('.rv').forEach(function(el,i){el.style.transitionDelay=(i%4)*70+'ms';io.observe(el)});
+})();
+</script>
+</body>
+</html>
