@@ -45,6 +45,9 @@ dependencies:
   equatable: ^2.0.0
   crypto: ^3.0.3
 
+  # Security (X25519 key exchange, Ed25519 identity, ChaCha20-Poly1305)
+  cryptography: ^2.7.0
+
   # Logging
   logger: ^2.0.0
 

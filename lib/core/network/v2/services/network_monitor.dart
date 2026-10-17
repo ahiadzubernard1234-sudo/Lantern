@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:logger/logger.dart';
+import 'package:network_info_plus/network_info_plus.dart';
 
 typedef NetworkStatusCallback = void Function(NetworkStatus status);
 
@@ -13,6 +14,7 @@ class NetworkMonitor {
 
   NetworkStatus _currentStatus = NetworkStatus.unknown;
   String? _currentLocalIp;
+  String? _currentSubnetMask;
   String? _currentBroadcastAddress;
 
   bool _isMonitoring = false;
@@ -54,19 +56,25 @@ class NetworkMonitor {
   Future<void> _checkNetworkStatus() async {
     try {
       final newIpAddress = await _getLocalIpAddress();
+      final newMask = newIpAddress == null ? null : await _getSubnetMask();
 
       // LANtern is local-first: internet access is not required.
       final newStatus = newIpAddress != null
           ? NetworkStatus.connected
           : NetworkStatus.offline;
 
-      // IP changed or status changed
-      if (newIpAddress != _currentLocalIp || newStatus != _currentStatus) {
+      // IP, mask or status changed
+      if (newIpAddress != _currentLocalIp ||
+          newMask != _currentSubnetMask ||
+          newStatus != _currentStatus) {
         _currentStatus = newStatus;
         _currentLocalIp = newIpAddress;
-        _currentBroadcastAddress = _calculateBroadcastAddress(newIpAddress);
+        _currentSubnetMask = newMask;
+        _currentBroadcastAddress =
+            _calculateBroadcastAddress(newIpAddress, newMask);
 
-        _logger.d('Network status changed: $newStatus (IP: $newIpAddress)');
+        _logger.d('Network status changed: $newStatus (IP: $newIpAddress, '
+            'mask: $newMask, broadcast: $_currentBroadcastAddress)');
         _notifyStatusChange();
       }
     } catch (e) {
@@ -109,22 +117,46 @@ class NetworkMonitor {
     return null;
   }
 
-  /// Calculate broadcast address from IP
-  String _calculateBroadcastAddress(String? ip) {
-    if (ip == null || ip.isEmpty) {
+  /// Get the Wi-Fi subnet mask (null on hotspot host or when unavailable)
+  Future<String?> _getSubnetMask() async {
+    try {
+      return await NetworkInfo().getWifiSubmask();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  List<int>? _parseIpv4(String? value) {
+    if (value == null) return null;
+    final parts = value.split('.');
+    if (parts.length != 4) return null;
+    final out = <int>[];
+    for (final p in parts) {
+      final n = int.tryParse(p);
+      if (n == null || n < 0 || n > 255) return null;
+      out.add(n);
+    }
+    return out;
+  }
+
+  /// Calculate the directed broadcast address from IP and subnet mask.
+  /// Falls back to a /24 network when the mask is unknown.
+  String _calculateBroadcastAddress(String? ip, [String? mask]) {
+    final ipParts = _parseIpv4(ip);
+    if (ipParts == null) {
       return '255.255.255.255';
     }
 
-    try {
-      final parts = ip.split('.');
-      if (parts.length == 4) {
-        return '${parts[0]}.${parts[1]}.${parts[2]}.255';
-      }
-    } catch (e) {
-      _logger.w('Error calculating broadcast address: $e');
+    var maskParts = _parseIpv4(mask);
+    if (maskParts == null || maskParts.every((b) => b == 0)) {
+      maskParts = [255, 255, 255, 0];
     }
 
-    return '255.255.255.255';
+    final broadcast = List<int>.generate(
+      4,
+      (i) => (ipParts[i] & maskParts![i]) | ((~maskParts[i]) & 0xFF),
+    );
+    return broadcast.join('.');
   }
 
   /// Check if connected to network
@@ -180,6 +212,7 @@ class NetworkMonitor {
     return {
       'status': _currentStatus.toString(),
       'localIp': _currentLocalIp,
+      'subnetMask': _currentSubnetMask,
       'broadcastAddress': _currentBroadcastAddress,
       'isMonitoring': _isMonitoring,
     };

@@ -18,7 +18,7 @@ class DatabaseService {
 
     _database = await openDatabase(
       dbPath,
-      version: 3,
+      version: 4,
       onCreate: _createTables,
       onUpgrade: _upgradeTables,
     );
@@ -143,6 +143,36 @@ class DatabaseService {
     await db.execute('CREATE INDEX IF NOT EXISTS idx_peers_device_id ON peers(device_id)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_peers_online ON peers(is_online)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_file_transfers_session ON file_transfers(session_id)');
+
+    await _createSecurityTables(db);
+  }
+
+  /// Tables for peer key pinning and the persistent outbox (schema v4).
+  Future<void> _createSecurityTables(DatabaseExecutor db) async {
+    // Pinned peer identity keys (trust on first use)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS trusted_peers (
+        device_id TEXT PRIMARY KEY,
+        public_key TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        verified INTEGER NOT NULL DEFAULT 0,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL
+      )
+    ''');
+
+    // Messages waiting for delivery
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS outbox (
+        id TEXT PRIMARY KEY,
+        receiver_id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_attempt INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_outbox_receiver ON outbox(receiver_id)');
   }
 
   Future<void> _upgradeTables(Database db, int oldVersion, int newVersion) async {
@@ -211,6 +241,9 @@ class DatabaseService {
         await txn.execute('CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)');
         await txn.execute('CREATE INDEX IF NOT EXISTS idx_channel_messages_channel ON channel_messages(channel_id)');
       });
+    }
+    if (oldVersion < 4) {
+      await _createSecurityTables(db);
     }
   }
 

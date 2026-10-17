@@ -3,20 +3,28 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:logger/logger.dart';
 import '../models/network_models.dart';
+import 'crypto_service.dart';
 
 typedef MessageCallback = void Function(NetworkMessage message);
 
+/// TCP connections between peers.
+///
+/// Every connection starts with a signed hello (X25519 key exchange bound to
+/// the device's Ed25519 identity). After that, all frames are encrypted with
+/// ChaCha20-Poly1305. Messages whose sender does not match the authenticated
+/// device of the connection are dropped.
 class ConnectionManager {
   static final ConnectionManager _instance = ConnectionManager._internal();
   final Logger _logger = Logger();
+  final CryptoService _crypto = CryptoService();
 
   late ServerSocket _serverSocket;
   StreamSubscription<Socket>? _serverSubscription;
   final Map<String, _PeerConnection> _connections = {};
+  final Set<_PeerConnection> _open = {};
+  final Map<String, Future<void>> _connecting = {};
   final List<MessageCallback> _messageCallbacks = [];
-  final Map<String, StreamSubscription<List<int>>> _subscriptions = {};
   final Map<String, Timer> _heartbeatTimers = {};
-  final Map<String, List<int>> _receiveBuffers = {};
 
   bool _isInitialized = false;
   String? _localDeviceId;
@@ -24,6 +32,12 @@ class ConnectionManager {
   static const int SERVER_PORT = 15555;
   static const int HEARTBEAT_INTERVAL_SECONDS = 10;
   static const int CONNECTION_TIMEOUT_SECONDS = 30;
+  static const int HANDSHAKE_TIMEOUT_SECONDS = 10;
+
+  static const int _tagHello = 1;
+  static const int _tagData = 2;
+  static const int _maxFrameSize = 1024 * 1024;
+  static const int _maxPreAuthFrameSize = 8 * 1024;
 
   factory ConnectionManager() => _instance;
   ConnectionManager._internal();
@@ -35,7 +49,6 @@ class ConnectionManager {
     try {
       _localDeviceId = localDeviceId;
 
-      // Bind TCP server
       _serverSocket = await ServerSocket.bind(
         InternetAddress.anyIPv4,
         SERVER_PORT,
@@ -43,7 +56,6 @@ class ConnectionManager {
 
       _logger.i('TCP server listening on port $SERVER_PORT');
 
-      // Accept incoming connections
       _serverSubscription = _serverSocket.listen(
         (Socket clientSocket) {
           _handleIncomingConnection(clientSocket);
@@ -73,38 +85,60 @@ class ConnectionManager {
       remoteAddress: remoteAddress,
       isOutgoing: false,
     );
+    _attach(connection);
+  }
 
-    final subscription = socket.listen(
-      (List<int> data) {
-        _receiveBuffers.putIfAbsent(remoteAddress, () => <int>[]).addAll(data);
-        _drainFrames(socket, connection, remoteAddress);
+  /// Wire up a socket: handshake timeout and data/error/done handlers.
+  void _attach(_PeerConnection c) {
+    _open.add(c);
+
+    c.handshakeTimer = Timer(
+      const Duration(seconds: HANDSHAKE_TIMEOUT_SECONDS),
+      () {
+        if (c.keys == null) {
+          _logger.w('Handshake timeout with ${c.remoteAddress}');
+          _removeConnection(c);
+        }
       },
-      onError: (error) {
-        _logger.e('Socket error for $remoteAddress: $error');
-        _removeConnection(connection);
+    );
+
+    c.subscription = c.socket.listen(
+      (List<int> data) => _onData(c, data),
+      onError: (Object error) {
+        _logger.e('Socket error for ${c.remoteAddress}: $error');
+        _removeConnection(c);
       },
       onDone: () {
-        _logger.d('Connection closed from $remoteAddress');
-        _removeConnection(connection);
+        _logger.d('Connection closed ${c.remoteAddress}');
+        _removeConnection(c);
       },
       cancelOnError: true,
     );
-    _subscriptions[remoteAddress] = subscription;
   }
 
-  /// Connect to a peer
+  /// Connect to a peer (one attempt at a time per device)
   Future<void> connectToPeer({
+    required String ipAddress,
+    required int port,
+    required String deviceId,
+  }) {
+    if (isConnectedTo(deviceId)) {
+      _logger.d('Already connected to device: $deviceId');
+      return Future.value();
+    }
+    return _connecting.putIfAbsent(
+      deviceId,
+      () => _connect(ipAddress: ipAddress, port: port, deviceId: deviceId)
+          .whenComplete(() => _connecting.remove(deviceId)),
+    );
+  }
+
+  Future<void> _connect({
     required String ipAddress,
     required int port,
     required String deviceId,
   }) async {
     try {
-      // Check if already connected
-      if (_connections.containsKey(deviceId)) {
-        _logger.d('Already connected to device: $deviceId');
-        return;
-      }
-
       final socket = await Socket.connect(
         ipAddress,
         port,
@@ -117,12 +151,21 @@ class ConnectionManager {
         socket: socket,
         remoteAddress: '$ipAddress:$port',
         isOutgoing: true,
-        remoteDeviceId: deviceId,
+        expectedDeviceId: deviceId,
       );
+      _attach(connection);
 
-      _connections[deviceId] = connection;
+      await (connection.helloSending ??= _sendHello(connection));
+      final ok = await connection.ready.future.timeout(
+        const Duration(seconds: HANDSHAKE_TIMEOUT_SECONDS),
+        onTimeout: () => false,
+      );
+      if (!ok) {
+        _removeConnection(connection);
+        throw Exception('Secure handshake with $deviceId failed');
+      }
 
-      // Send handshake
+      // Encrypted handshake notice (kept for compatibility)
       await sendMessage(
         message: NetworkMessage(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -136,45 +179,36 @@ class ConnectionManager {
         deviceId: deviceId,
       );
 
-      final remoteAddress = '$ipAddress:$port';
-      final subscription = socket.listen(
-        (List<int> data) {
-          _receiveBuffers.putIfAbsent(remoteAddress, () => <int>[]).addAll(data);
-          _drainFrames(socket, connection, remoteAddress);
-        },
-        onError: (error) {
-          _logger.e('Connection error with $deviceId: $error');
-          _removeConnection(connection);
-        },
-        onDone: () {
-          _logger.d('Connection closed with $deviceId');
-          _removeConnection(connection);
-        },
-        cancelOnError: true,
-      );
-      _subscriptions[remoteAddress] = subscription;
-
       _startHeartbeat(deviceId);
     } catch (e) {
       _logger.e('Failed to connect to $ipAddress:$port: $e');
-      _connections.remove(deviceId);
       rethrow;
     }
   }
 
-  /// Send message to peer
+  /// Send our signed hello
+  Future<void> _sendHello(_PeerConnection c) async {
+    final hello = await _crypto.createHello(_localDeviceId ?? 'unknown');
+    c.localHello = hello;
+    final payload = [_tagHello, ...utf8.encode(jsonEncode(hello.json))];
+    c.socket.add(_frame(payload));
+    await c.socket.flush();
+  }
+
+  /// Send message to peer (encrypted)
   Future<void> sendMessage({
     required NetworkMessage message,
     required String deviceId,
   }) async {
     try {
       final connection = _connections[deviceId];
-      if (connection == null || false) {
+      if (connection == null || connection.keys == null) {
         _logger.w('Connection not available for device: $deviceId');
         throw Exception('No active connection to $deviceId');
       }
 
-      connection.socket.add(_frame(message.encode()));
+      final cipher = await _crypto.encrypt(connection.keys!.send, message.encode());
+      connection.socket.add(_frame([_tagData, ...cipher]));
       await connection.socket.flush();
 
       _logger.d('Message sent to $deviceId (${message.type})');
@@ -184,8 +218,6 @@ class ConnectionManager {
       rethrow;
     }
   }
-
-  static const int _maxFrameSize = 1024 * 1024;
 
   List<int> _frame(List<int> payload) {
     if (payload.length > _maxFrameSize) {
@@ -200,43 +232,134 @@ class ConnectionManager {
     ];
   }
 
-  void _drainFrames(Socket socket, _PeerConnection connection, String remoteAddress) {
-    final buffer = _receiveBuffers[remoteAddress]!;
-    while (buffer.length >= 4) {
-      final length = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
-      if (length <= 0 || length > _maxFrameSize) {
-        _logger.w('Invalid frame length from $remoteAddress: $length');
-        _removeConnection(connection);
+  /// Collect bytes and split them into length-prefixed frames
+  void _onData(_PeerConnection c, List<int> data) {
+    c.buffer.addAll(data);
+    while (c.buffer.length >= 4) {
+      final length =
+          (c.buffer[0] << 24) | (c.buffer[1] << 16) | (c.buffer[2] << 8) | c.buffer[3];
+      final limit = c.keys == null ? _maxPreAuthFrameSize : _maxFrameSize;
+      if (length <= 0 || length > limit) {
+        _logger.w('Invalid frame length from ${c.remoteAddress}: $length');
+        _removeConnection(c);
         return;
       }
-      if (buffer.length < length + 4) return;
-      final payload = buffer.sublist(4, 4 + length);
-      buffer.removeRange(0, 4 + length);
-      try {
-        final message = NetworkMessage.decode(payload);
-        _logger.d('Message received from $remoteAddress: ${message.type}');
-        if (message.type == MessageType.discovery) {
-          final deviceId = message.metadata?['deviceId'];
-          if (deviceId is String && deviceId.isNotEmpty) {
-            connection.remoteDeviceId = deviceId;
-            _connections[deviceId] = connection;
-          }
-        }
-        _notifyMessageCallbacks(message);
-      } catch (e) {
-        _logger.w('Error decoding frame from $remoteAddress: $e');
-      }
+      if (c.buffer.length < length + 4) return;
+      final payload = c.buffer.sublist(4, 4 + length);
+      c.buffer.removeRange(0, 4 + length);
+
+      // Process frames one at a time, in order
+      c.inbox = c.inbox
+          .then((_) => _processFrame(c, payload))
+          .catchError((Object e) {
+        _logger.w('Error processing frame from ${c.remoteAddress}: $e');
+      });
     }
   }
 
+  Future<void> _processFrame(_PeerConnection c, List<int> payload) async {
+    if (payload.isEmpty) return;
+    final tag = payload[0];
+    final body = payload.sublist(1);
+
+    if (tag == _tagHello) {
+      await _onHello(c, body);
+      return;
+    }
+
+    if (tag != _tagData) {
+      _logger.w('Unknown frame tag $tag from ${c.remoteAddress}');
+      return;
+    }
+
+    final keys = c.keys;
+    if (keys == null) {
+      _logger.w('Data before handshake from ${c.remoteAddress}, closing');
+      _removeConnection(c);
+      return;
+    }
+
+    final List<int> plain;
+    try {
+      plain = await _crypto.decrypt(keys.receive, body);
+    } catch (e) {
+      _logger.w('Decryption failed from ${c.remoteAddress}, closing: $e');
+      _removeConnection(c);
+      return;
+    }
+
+    final message = NetworkMessage.decode(plain);
+
+    // The sender must be the device this connection authenticated as.
+    if (message.senderId != c.remoteDeviceId) {
+      _logger.w('Dropped message with spoofed sender ${message.senderId} '
+          'on connection authenticated as ${c.remoteDeviceId}');
+      return;
+    }
+
+    _logger.d('Message received from ${c.remoteDeviceId}: ${message.type}');
+    _notifyMessageCallbacks(message);
+  }
+
+  /// Verify the peer's hello, pin its key, and derive session keys
+  Future<void> _onHello(_PeerConnection c, List<int> body) async {
+    if (c.keys != null) return; // ignore repeated hellos
+
+    Map<String, dynamic> json;
+    try {
+      json = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
+    } catch (_) {
+      _logger.w('Malformed hello from ${c.remoteAddress}');
+      _removeConnection(c);
+      return;
+    }
+
+    final hello = await _crypto.verifyHello(json);
+    if (hello == null ||
+        hello.deviceId == _localDeviceId ||
+        (c.expectedDeviceId != null && hello.deviceId != c.expectedDeviceId)) {
+      _logger.w('Rejected hello from ${c.remoteAddress}');
+      _removeConnection(c);
+      return;
+    }
+
+    final trust = await _crypto.checkTrust(hello.deviceId, hello.identityKey);
+    if (trust == TrustState.changed) {
+      _removeConnection(c);
+      return;
+    }
+
+    // Incoming side answers with its own hello
+    await (c.helloSending ??= _sendHello(c));
+    final local = c.localHello!;
+    if (local.ephemeralKey == hello.ephemeralKey) {
+      _logger.w('Rejected reflected hello from ${c.remoteAddress}');
+      _removeConnection(c);
+      return;
+    }
+
+    c.keys = await _crypto.deriveSession(
+      myEphemeral: local.ephemeral,
+      myEphemeralKey: local.ephemeralKey,
+      theirEphemeralKey: hello.ephemeralKey,
+    );
+    c.remoteDeviceId = hello.deviceId;
+    c.handshakeTimer?.cancel();
+    _connections[hello.deviceId] = c;
+    if (!c.ready.isCompleted) c.ready.complete(true);
+    _logger.i('Secure session with ${hello.deviceId}');
+  }
+
   void _removeConnection(_PeerConnection connection) {
+    _open.remove(connection);
     final id = connection.remoteDeviceId;
-    if (id != null && identical(_connections[id]?.socket, connection.socket)) {
+    if (id != null && identical(_connections[id], connection)) {
       _connections.remove(id);
       _heartbeatTimers.remove(id)?.cancel();
     }
-    _subscriptions.remove(connection.remoteAddress)?.cancel();
-    _receiveBuffers.remove(connection.remoteAddress);
+    connection.handshakeTimer?.cancel();
+    connection.subscription?.cancel();
+    if (!connection.ready.isCompleted) connection.ready.complete(false);
     connection.socket.destroy();
   }
 
@@ -278,10 +401,7 @@ class ConnectionManager {
       final connection = _connections[deviceId];
       if (connection != null) {
         _heartbeatTimers.remove(deviceId)?.cancel();
-        _subscriptions.remove(connection.remoteAddress)?.cancel();
-        _receiveBuffers.remove(connection.remoteAddress);
-        await connection.socket.close();
-        _connections.remove(deviceId);
+        _removeConnection(connection);
         _logger.i('Disconnected from $deviceId');
       }
     } catch (e) {
@@ -310,7 +430,7 @@ class ConnectionManager {
     }
   }
 
-  /// Get connected peers
+  /// Get connected peers (secure sessions only)
   List<String> getConnectedDevices() {
     return _connections.keys.toList();
   }
@@ -318,7 +438,7 @@ class ConnectionManager {
   /// Check if connected to device
   bool isConnectedTo(String deviceId) {
     final connection = _connections[deviceId];
-    return connection != null && !false;
+    return connection != null && connection.keys != null;
   }
 
   /// Get connection count
@@ -331,16 +451,13 @@ class ConnectionManager {
         timer.cancel();
       }
       _heartbeatTimers.clear();
-      for (final sub in _subscriptions.values) {
-        await sub.cancel();
-      }
-      _subscriptions.clear();
       await _serverSubscription?.cancel();
       _serverSubscription = null;
-      _receiveBuffers.clear();
-      for (final deviceId in _connections.keys.toList()) {
-        await disconnectPeer(deviceId);
+      for (final connection in _open.toList()) {
+        _removeConnection(connection);
       }
+      _connections.clear();
+      _connecting.clear();
       if (_isInitialized) await _serverSocket.close();
       _isInitialized = false;
       _logger.i('Connection manager shutdown');
@@ -355,12 +472,22 @@ class _PeerConnection {
   final Socket socket;
   final String remoteAddress;
   final bool isOutgoing;
+  final String? expectedDeviceId;
   String? remoteDeviceId;
+
+  final List<int> buffer = <int>[];
+  final Completer<bool> ready = Completer<bool>();
+  Future<void> inbox = Future<void>.value();
+  Future<void>? helloSending;
+  LocalHello? localHello;
+  SessionKeys? keys;
+  StreamSubscription<List<int>>? subscription;
+  Timer? handshakeTimer;
 
   _PeerConnection({
     required this.socket,
     required this.remoteAddress,
     required this.isOutgoing,
-    this.remoteDeviceId,
+    this.expectedDeviceId,
   });
 }

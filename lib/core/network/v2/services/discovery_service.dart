@@ -21,6 +21,7 @@ class DiscoveryService {
   String? _currentUsername;
   String? _currentDeviceName;
   String? _currentIpAddress;
+  String? Function()? _broadcastProvider;
 
   static const int DISCOVERY_PORT = 15554;
   static const int BROADCAST_INTERVAL_SECONDS = 5;
@@ -29,12 +30,16 @@ class DiscoveryService {
   factory DiscoveryService() => _instance;
   DiscoveryService._internal();
 
-  /// Start peer discovery service
+  /// Start peer discovery service.
+  ///
+  /// [broadcastAddressProvider] returns the subnet-aware broadcast address
+  /// (from the network monitor). Without it a /24 network is assumed.
   Future<void> startDiscovery({
     required String deviceId,
     required String username,
     required String deviceName,
     required String ipAddress,
+    String? Function()? broadcastAddressProvider,
   }) async {
     if (_isRunning) return;
 
@@ -43,12 +48,15 @@ class DiscoveryService {
       _currentUsername = username;
       _currentDeviceName = deviceName;
       _currentIpAddress = ipAddress;
+      _broadcastProvider = broadcastAddressProvider;
 
       // Bind UDP socket for receiving discovery packets
       _discoverySocket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
         DISCOVERY_PORT,
       );
+      // Required to send to broadcast addresses
+      _discoverySocket.broadcastEnabled = true;
 
       _logger.i('Discovery socket bound to port $DISCOVERY_PORT');
 
@@ -101,7 +109,7 @@ class DiscoveryService {
     }
   }
 
-  /// Send discovery packet to all devices on network
+  /// Send discovery packet to every broadcast target
   Future<void> _sendDiscoveryPacket() async {
     try {
       if (!_isRunning || _currentDeviceId == null) return;
@@ -122,19 +130,45 @@ class DiscoveryService {
         },
       );
 
-      final broadcastAddress = await _getBroadcastAddress();
       final encoded = packet.encode();
-
-      await _discoverySocket.send(
-        encoded,
-        InternetAddress(broadcastAddress),
-        DISCOVERY_PORT,
-      );
-
-      _logger.d('Discovery packet sent to $broadcastAddress:$DISCOVERY_PORT');
+      for (final target in _getBroadcastTargets()) {
+        try {
+          _discoverySocket.send(
+            encoded,
+            InternetAddress(target),
+            DISCOVERY_PORT,
+          );
+          _logger.d('Discovery packet sent to $target:$DISCOVERY_PORT');
+        } catch (e) {
+          _logger.w('Failed to send discovery packet to $target: $e');
+        }
+      }
     } catch (e) {
       _logger.w('Failed to send discovery packet: $e');
     }
+  }
+
+  /// Broadcast targets: subnet-aware address, /24 guess, then global broadcast
+  List<String> _getBroadcastTargets() {
+    final targets = <String>[];
+
+    try {
+      final provided = _broadcastProvider?.call();
+      if (provided != null && provided.isNotEmpty) targets.add(provided);
+    } catch (e) {
+      _logger.w('Broadcast provider failed: $e');
+    }
+
+    final ip = _currentIpAddress;
+    if (ip != null && ip.isNotEmpty) {
+      final parts = ip.split('.');
+      if (parts.length == 4) {
+        targets.add('${parts[0]}.${parts[1]}.${parts[2]}.255');
+      }
+    }
+
+    targets.add('255.255.255.255');
+    return targets.toSet().toList();
   }
 
   /// Handle incoming discovery packet
@@ -155,12 +189,13 @@ class DiscoveryService {
         return;
       }
 
-      // Create or update peer
+      // Use the real source address, not the one the packet claims.
+      // (Identity is verified later by the encrypted handshake.)
       final peer = PeerInfo(
         deviceId: deviceId,
         username: metadata['username'] is String ? metadata['username'] as String : 'Unknown',
         deviceName: metadata['deviceName'] is String ? metadata['deviceName'] as String : 'Unknown Device',
-        ipAddress: metadata['ipAddress'] is String ? metadata['ipAddress'] as String : datagram.address.address,
+        ipAddress: datagram.address.address,
         port: metadata['port'] is int ? metadata['port'] as int : 15555,
         lastSeen: DateTime.now().millisecondsSinceEpoch,
         isOnline: true,
@@ -208,25 +243,6 @@ class DiscoveryService {
       }
     } catch (e) {
       _logger.e('Error removing stale peers: $e');
-    }
-  }
-
-  /// Get network broadcast address
-  Future<String> _getBroadcastAddress() async {
-    try {
-      // Try to calculate subnet broadcast address
-      if (_currentIpAddress != null && _currentIpAddress!.isNotEmpty) {
-        final parts = _currentIpAddress!.split('.');
-        if (parts.length == 4) {
-          return '${parts[0]}.${parts[1]}.${parts[2]}.255';
-        }
-      }
-
-      // Fallback to global broadcast
-      return '255.255.255.255';
-    } catch (e) {
-      _logger.w('Error calculating broadcast address: $e');
-      return '255.255.255.255';
     }
   }
 

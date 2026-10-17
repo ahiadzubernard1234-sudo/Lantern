@@ -10,6 +10,8 @@ import 'services/room_manager.dart';
 import 'services/file_transfer_service.dart';
 import 'services/security_service.dart';
 import 'services/network_monitor.dart';
+import 'services/crypto_service.dart';
+import 'services/outbox_service.dart';
 
 class NetworkServiceCoordinator {
   static final NetworkServiceCoordinator _instance =
@@ -23,6 +25,14 @@ class NetworkServiceCoordinator {
 
   bool _initialized = false;
   late Timer _maintenanceTimer;
+  StreamSubscription<TrustAlert>? _trustAlertSub;
+
+  // Messages currently being sent, and peers whose outbox is being flushed
+  final Set<String> _inFlight = {};
+  final Set<String> _flushing = {};
+
+  // Chat messages we already accepted (lets us re-ACK duplicates)
+  final Map<String, DateTime> _recentReceived = {};
 
   // Services
   final discoveryService = DiscoveryService();
@@ -34,9 +44,14 @@ class NetworkServiceCoordinator {
   final fileTransferService = FileTransferService();
   final securityService = SecurityService();
   final networkMonitor = NetworkMonitor();
+  final cryptoService = CryptoService();
+  final outboxService = OutboxService();
 
   factory NetworkServiceCoordinator() => _instance;
   NetworkServiceCoordinator._internal();
+
+  /// Peers whose identity key changed (show a warning in the UI).
+  Stream<TrustAlert> get trustAlerts => cryptoService.alerts;
 
   /// Initialize all services
   Future<void> initialize({
@@ -55,6 +70,7 @@ class NetworkServiceCoordinator {
 
       // Initialize services in order
       await securityService.initialize(deviceId: deviceId);
+      await cryptoService.initialize();
       await connectionManager.initialize(localDeviceId: deviceId);
       await networkMonitor.startMonitoring();
 
@@ -68,6 +84,7 @@ class NetworkServiceCoordinator {
         username: username,
         deviceName: deviceName,
         ipAddress: localIp,
+        broadcastAddressProvider: networkMonitor.getBroadcastAddress,
       );
 
       // Setup callbacks
@@ -94,7 +111,7 @@ class NetworkServiceCoordinator {
       _handleReceivedMessage(message);
     });
 
-    // Presence manager receives heartbeats
+    // Presence manager receives heartbeats; deliver queued messages to peers
     discoveryService.addListener((peers) {
       for (final peer in peers) {
         presenceManager.initializePeer(
@@ -102,18 +119,48 @@ class NetworkServiceCoordinator {
           username: peer.username,
         );
         presenceManager.recordHeartbeat(peer.deviceId);
+        unawaited(_flushOutboxFor(peer.deviceId));
       }
     });
 
     // Delivery manager status updates
     deliveryManager.addStatusCallback((delivery) {
       _logger.d('Delivery status: ${delivery.messageId} -> ${delivery.status}');
+      switch (delivery.status) {
+        case DeliveryStatus.delivered:
+        case DeliveryStatus.read:
+          _inFlight.remove(delivery.messageId);
+          unawaited(outboxService.remove(delivery.messageId));
+          break;
+        case DeliveryStatus.failed:
+          // Stays in the outbox and is retried when the peer is back
+          _inFlight.remove(delivery.messageId);
+          break;
+        default:
+          break;
+      }
+    });
+
+    _trustAlertSub = cryptoService.alerts.listen((alert) {
+      _logger.w('Identity key changed for ${alert.deviceId}: '
+          '${alert.oldFingerprint} -> ${alert.newFingerprint}');
     });
   }
 
   /// Handle received message
   void _handleReceivedMessage(NetworkMessage message) {
     try {
+      final isChat = message.type == MessageType.text ||
+          message.type == MessageType.image;
+
+      // A resend of something we already accepted: just ACK again
+      if (isChat &&
+          message.receiverId == _deviceId &&
+          _recentReceived.containsKey(message.id)) {
+        _sendAck(message);
+        return;
+      }
+
       // Validate packet
       if (!securityService.validatePacket(message)) {
         _logger.w('Invalid packet received: ${message.id}');
@@ -132,7 +179,8 @@ class NetworkServiceCoordinator {
 
         case MessageType.text:
         case MessageType.image:
-          messageService.handleReceivedMessage(message);
+          _recentReceived[message.id] = DateTime.now();
+          messageService.handleReceivedMessage(_restoreOriginalTimestamp(message));
           // Auto-send ACK
           _sendAck(message);
           break;
@@ -155,6 +203,23 @@ class NetworkServiceCoordinator {
     } catch (e) {
       _logger.e('Error handling received message: $e');
     }
+  }
+
+  /// Queued messages are resent with a fresh timestamp; show the original one.
+  NetworkMessage _restoreOriginalTimestamp(NetworkMessage message) {
+    final original = message.metadata?['originalTimestamp'];
+    if (original is! int || original <= 0 || original > message.timestamp) {
+      return message;
+    }
+    return NetworkMessage(
+      id: message.id,
+      senderId: message.senderId,
+      receiverId: message.receiverId,
+      type: message.type,
+      content: message.content,
+      timestamp: original,
+      metadata: message.metadata,
+    );
   }
 
   /// Send ACK for received message
@@ -181,7 +246,10 @@ class NetworkServiceCoordinator {
     }
   }
 
-  /// Send text message to peer
+  /// Send text message to peer.
+  ///
+  /// The message is saved to the persistent outbox first, so it is still
+  /// delivered later if the peer is offline or the app restarts.
   Future<void> sendMessage({
     required String recipientId,
     required String content,
@@ -196,28 +264,8 @@ class NetworkServiceCoordinator {
         timestamp: DateTime.now().millisecondsSinceEpoch,
       );
 
-      // Track delivery
-      deliveryManager.trackMessage(
-        message: message,
-        recipientId: recipientId,
-        sendFunction: () async {
-          // Connect to peer if not already connected
-          final peer = discoveryService.getPeerByDeviceId(recipientId);
-          if (peer != null && !connectionManager.isConnectedTo(recipientId)) {
-            await connectionManager.connectToPeer(
-              ipAddress: peer.ipAddress,
-              port: peer.port,
-              deviceId: recipientId,
-            );
-          }
-
-          // Send message
-          await connectionManager.sendMessage(
-            message: message,
-            deviceId: recipientId,
-          );
-        },
-      );
+      await outboxService.enqueue(message);
+      _dispatch(message);
 
       // Save locally
       await messageService.sendMessage(
@@ -229,6 +277,67 @@ class NetworkServiceCoordinator {
     } catch (e) {
       _logger.e('Failed to send message: $e');
       rethrow;
+    }
+  }
+
+  /// Hand a message to the delivery manager (ACK tracking and retries)
+  void _dispatch(NetworkMessage message) {
+    final recipientId = message.receiverId;
+    _inFlight.add(message.id);
+
+    deliveryManager.trackMessage(
+      message: message,
+      recipientId: recipientId,
+      sendFunction: () async {
+        // Connect to peer if not already connected
+        final peer = discoveryService.getPeerByDeviceId(recipientId);
+        if (peer != null && !connectionManager.isConnectedTo(recipientId)) {
+          await connectionManager.connectToPeer(
+            ipAddress: peer.ipAddress,
+            port: peer.port,
+            deviceId: recipientId,
+          );
+        }
+
+        // Send message
+        await connectionManager.sendMessage(
+          message: message,
+          deviceId: recipientId,
+        );
+      },
+    );
+  }
+
+  /// Resend queued messages to a peer that is online
+  Future<void> _flushOutboxFor(String deviceId) async {
+    if (!_flushing.add(deviceId)) return;
+    try {
+      final due = await outboxService.dueFor(deviceId);
+      for (final queued in due) {
+        if (_inFlight.contains(queued.id)) continue;
+
+        // Fresh timestamp so the receiver's replay window accepts it; the
+        // original time travels in metadata.
+        final fresh = NetworkMessage(
+          id: queued.id,
+          senderId: queued.senderId,
+          receiverId: queued.receiverId,
+          type: queued.type,
+          content: queued.content,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+          metadata: {
+            ...?queued.metadata,
+            'originalTimestamp': queued.timestamp,
+          },
+        );
+
+        await outboxService.markAttempt(queued.id);
+        _dispatch(fresh);
+      }
+    } catch (e) {
+      _logger.w('Outbox flush failed for $deviceId: $e');
+    } finally {
+      _flushing.remove(deviceId);
     }
   }
 
@@ -257,6 +366,13 @@ class NetworkServiceCoordinator {
     }
   }
 
+  /// Fingerprint of this device's identity (for "verify safety number" screens)
+  String get localFingerprint => cryptoService.localFingerprint;
+
+  /// Fingerprint of a peer's pinned identity, or null if not seen yet
+  Future<String?> peerFingerprint(String deviceId) =>
+      cryptoService.peerFingerprint(deviceId);
+
   /// Perform periodic maintenance
   void _performMaintenance() {
     try {
@@ -272,6 +388,11 @@ class NetworkServiceCoordinator {
       // Clean up delivery manager
       deliveryManager.cleanupOldMessages();
 
+      // Drop queued messages that are too old, and old duplicate-ACK records
+      unawaited(outboxService.purge());
+      final cutoff = DateTime.now().subtract(const Duration(hours: 24));
+      _recentReceived.removeWhere((_, seenAt) => seenAt.isBefore(cutoff));
+
       _logger.d('Maintenance completed');
     } catch (e) {
       _logger.e('Error during maintenance: $e');
@@ -285,6 +406,7 @@ class NetworkServiceCoordinator {
       'deviceId': _deviceId,
       'username': _username,
       'deviceName': _deviceName,
+      'identityFingerprint': cryptoService.localFingerprint,
       'network': networkMonitor.getStats(),
       'peers': {
         'discovered': discoveryService.peerCount,
@@ -304,6 +426,8 @@ class NetworkServiceCoordinator {
   Future<void> shutdown() async {
     try {
       if (_initialized) _maintenanceTimer.cancel();
+      await _trustAlertSub?.cancel();
+      _trustAlertSub = null;
 
       await discoveryService.stopDiscovery();
       await connectionManager.shutdown();
@@ -314,6 +438,9 @@ class NetworkServiceCoordinator {
       presenceManager.clear();
       roomManager.clear();
       securityService.clear();
+      _inFlight.clear();
+      _flushing.clear();
+      _recentReceived.clear();
 
       _initialized = false;
       _logger.i('Network services shutdown complete');
