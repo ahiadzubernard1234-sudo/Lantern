@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lantern/core/network/v2/network_coordinator.dart';
 import 'package:lantern/core/theme/app_theme.dart';
 import 'package:lantern/features/profile/presentation/providers/profile_provider.dart';
 
@@ -69,6 +70,66 @@ class SettingsTab extends ConsumerWidget {
         ),
         const SizedBox(height: 32),
 
+        // Security Section
+        Text(
+          'Security',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: StreamBuilder<int>(
+              stream: Stream.periodic(const Duration(seconds: 1), (i) => i),
+              builder: (context, _) {
+                final coordinator = NetworkServiceCoordinator();
+                final fingerprint =
+                    coordinator.isInitialized ? coordinator.localFingerprint : null;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.shield_outlined),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Encrypted connections',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Your identity fingerprint',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      fingerprint ?? 'Starting...',
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 16,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Compare this with a friend in person to be sure you are '
+                      'chatting with the right device.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 32),
+
         // Theme Section
         Text(
           'Appearance',
@@ -111,16 +172,24 @@ class SettingsTab extends ConsumerWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     const Text('Discovery Status'),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.green.shade100,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Text(
-                        'Active',
-                        style: TextStyle(color: Colors.green),
-                      ),
+                    StreamBuilder<int>(
+                      stream: Stream.periodic(const Duration(seconds: 1), (i) => i),
+                      builder: (context, _) {
+                        final active = NetworkServiceCoordinator().isInitialized;
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: active ? Colors.green.shade100 : Colors.orange.shade100,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            active ? 'Active' : 'Starting',
+                            style: TextStyle(
+                              color: active ? Colors.green : Colors.orange.shade800,
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ],
                 ),
@@ -198,23 +267,67 @@ class SettingsTab extends ConsumerWidget {
     );
   }
 
-  void _showNetworkDiagnostics(BuildContext context) {
-    showDialog(
+  Widget _row(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label),
+          const SizedBox(width: 16),
+          Flexible(child: Text(value, textAlign: TextAlign.end)),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showNetworkDiagnostics(BuildContext context) async {
+    final coordinator = NetworkServiceCoordinator();
+
+    if (!coordinator.isInitialized) {
+      await showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Network Diagnostics'),
+          content: const Text('The network is still starting. Try again in a moment.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    final diagnostics = coordinator.getDiagnostics();
+    final queued = await coordinator.outboxService.pendingCount();
+    final network = (diagnostics['network'] as Map?) ?? const {};
+    final peers = (diagnostics['peers'] as Map?) ?? const {};
+
+    if (!context.mounted) return;
+    await showDialog(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Network Diagnostics'),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('✓ Local network access enabled'),
-            SizedBox(height: 8),
-            Text('✓ UDP broadcast functional'),
-            SizedBox(height: 8),
-            Text('✓ TCP server listening'),
-            SizedBox(height: 8),
-            Text('✓ Peer discovery active'),
-          ],
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _row('Status', '${network['status'] ?? 'unknown'}'.split('.').last),
+              _row('Local IP', '${network['localIp'] ?? 'none'}'),
+              _row('Subnet mask', '${network['subnetMask'] ?? 'unknown (using /24)'}'),
+              _row('Broadcast', '${network['broadcastAddress'] ?? 'none'}'),
+              const Divider(),
+              _row('Peers discovered', '${peers['discovered'] ?? 0}'),
+              _row('Peers online', '${peers['online'] ?? 0}'),
+              _row('Secure sessions', '${peers['connected'] ?? 0}'),
+              _row('Messages waiting', '$queued'),
+            ],
+          ),
         ),
         actions: [
           TextButton(

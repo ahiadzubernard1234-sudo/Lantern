@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lantern/core/network/v2/providers/network_providers.dart';
+import 'package:lantern/features/chat/presentation/pages/chat_screen.dart';
 
 class PeersTab extends ConsumerStatefulWidget {
   const PeersTab({Key? key}) : super(key: key);
@@ -71,7 +72,15 @@ class _PeersTabState extends ConsumerState<PeersTab> {
                   leading: CircleAvatar(child: Text(peer.username.isEmpty ? '?' : peer.username[0].toUpperCase())),
                   title: Text(peer.username),
                   subtitle: Text('${peer.deviceName} • ${peer.ipAddress}:${peer.port}'),
-                  trailing: Icon(peer.isOnline ? Icons.circle : Icons.circle_outlined, size: 12),
+                  trailing: Icon(
+                    peer.isOnline ? Icons.circle : Icons.circle_outlined,
+                    size: 12,
+                    color: peer.isOnline ? Colors.green : Colors.grey,
+                  ),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => ChatScreen(peer: peer)),
+                  ),
                 ),
               )).toList(),
             );

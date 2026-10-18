@@ -200,6 +200,17 @@ class CryptoService {
     return rows.isEmpty ? null : rows.first['fingerprint'] as String;
   }
 
+  /// True if the peer presented a new key that was rejected and is waiting
+  /// for the user to decide.
+  bool hasPendingKeyChange(String deviceId) =>
+      _pendingKeys.containsKey(deviceId);
+
+  /// Fingerprint of the rejected new key (null if none is pending).
+  String? pendingFingerprint(String deviceId) {
+    final key = _pendingKeys[deviceId];
+    return key == null ? null : fingerprintOf(key);
+  }
+
   /// Whether the user confirmed this peer's fingerprint out of band.
   Future<bool> isVerified(String deviceId) async {
     final rows = await DatabaseService().database.query('trusted_peers',

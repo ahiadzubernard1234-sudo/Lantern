@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:lantern/core/database/database_service.dart';
 import 'package:logger/logger.dart';
 import 'models/network_models.dart';
 import 'services/discovery_service.dart';
@@ -34,6 +35,9 @@ class NetworkServiceCoordinator {
   // Chat messages we already accepted (lets us re-ACK duplicates)
   final Map<String, DateTime> _recentReceived = {};
 
+  // Fires whenever a chat message is received, sent, or changes delivery state
+  final StreamController<void> _chatChanges = StreamController<void>.broadcast();
+
   // Services
   final discoveryService = DiscoveryService();
   final connectionManager = ConnectionManager();
@@ -52,6 +56,9 @@ class NetworkServiceCoordinator {
 
   /// Peers whose identity key changed (show a warning in the UI).
   Stream<TrustAlert> get trustAlerts => cryptoService.alerts;
+
+  /// Emits whenever a conversation may need to be reloaded.
+  Stream<void> get chatChanges => _chatChanges.stream;
 
   /// Initialize all services
   Future<void> initialize({
@@ -111,6 +118,9 @@ class NetworkServiceCoordinator {
       _handleReceivedMessage(message);
     });
 
+    // Saved incoming messages refresh open chats
+    messageService.addMessageCallback((_) => _chatChanges.add(null));
+
     // Presence manager receives heartbeats; deliver queued messages to peers
     discoveryService.addListener((peers) {
       for (final peer in peers) {
@@ -130,13 +140,15 @@ class NetworkServiceCoordinator {
         case DeliveryStatus.delivered:
         case DeliveryStatus.read:
           _inFlight.remove(delivery.messageId);
-          unawaited(outboxService.remove(delivery.messageId));
+          unawaited(_onDelivered(delivery.messageId));
           break;
         case DeliveryStatus.failed:
           // Stays in the outbox and is retried when the peer is back
           _inFlight.remove(delivery.messageId);
+          _chatChanges.add(null);
           break;
         default:
+          _chatChanges.add(null);
           break;
       }
     });
@@ -145,6 +157,22 @@ class NetworkServiceCoordinator {
       _logger.w('Identity key changed for ${alert.deviceId}: '
           '${alert.oldFingerprint} -> ${alert.newFingerprint}');
     });
+  }
+
+  /// A message was ACKed: drop it from the outbox and record delivery time
+  Future<void> _onDelivered(String messageId) async {
+    await outboxService.remove(messageId);
+    try {
+      await DatabaseService().database.update(
+        'messages',
+        {'delivered_at': DateTime.now().toIso8601String()},
+        where: 'id = ? AND delivered_at IS NULL',
+        whereArgs: [messageId],
+      );
+    } catch (e) {
+      _logger.w('Could not record delivery time: $e');
+    }
+    _chatChanges.add(null);
   }
 
   /// Handle received message
@@ -265,13 +293,15 @@ class NetworkServiceCoordinator {
       );
 
       await outboxService.enqueue(message);
-      _dispatch(message);
 
-      // Save locally
+      // Save locally first so it shows up in the chat right away
       await messageService.sendMessage(
         message: message,
         sendFunction: (_) async {},
       );
+      _chatChanges.add(null);
+
+      _dispatch(message);
 
       _logger.d('Message sent to $recipientId');
     } catch (e) {
