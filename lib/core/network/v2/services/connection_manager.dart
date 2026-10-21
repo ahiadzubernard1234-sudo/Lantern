@@ -7,6 +7,10 @@ import 'crypto_service.dart';
 
 typedef MessageCallback = void Function(NetworkMessage message);
 
+/// Called when a connected peer introduces itself (name, device, port).
+typedef HandshakeCallback = void Function(
+    String deviceId, String ipAddress, Map<String, dynamic> info);
+
 /// TCP connections between peers.
 ///
 /// Every connection starts with a signed hello (X25519 key exchange bound to
@@ -23,11 +27,15 @@ class ConnectionManager {
   final Map<String, _PeerConnection> _connections = {};
   final Set<_PeerConnection> _open = {};
   final Map<String, Future<void>> _connecting = {};
+  final Map<String, Future<String>> _connectingAddresses = {};
   final List<MessageCallback> _messageCallbacks = [];
+  final List<HandshakeCallback> _handshakeCallbacks = [];
   final Map<String, Timer> _heartbeatTimers = {};
 
   bool _isInitialized = false;
   String? _localDeviceId;
+  String? _localUsername;
+  String? _localDeviceName;
 
   static const int SERVER_PORT = 15555;
   static const int HEARTBEAT_INTERVAL_SECONDS = 10;
@@ -41,6 +49,12 @@ class ConnectionManager {
 
   factory ConnectionManager() => _instance;
   ConnectionManager._internal();
+
+  /// Name and device shown to peers when we introduce ourselves.
+  void setLocalProfile({required String username, required String deviceName}) {
+    _localUsername = username;
+    _localDeviceName = deviceName;
+  }
 
   /// Initialize TCP server and start listening
   Future<void> initialize({required String localDeviceId}) async {
@@ -78,7 +92,7 @@ class ConnectionManager {
   /// Handle incoming TCP connection
   void _handleIncomingConnection(Socket socket) {
     final remoteAddress = '${socket.remoteAddress.address}:${socket.remotePort}';
-    _logger.d('Incoming connection from $remoteAddress');
+    _logger.i('Incoming connection from $remoteAddress');
 
     final connection = _PeerConnection(
       socket: socket,
@@ -116,7 +130,7 @@ class ConnectionManager {
     );
   }
 
-  /// Connect to a peer (one attempt at a time per device)
+  /// Connect to a discovered peer (one attempt at a time per device)
   Future<void> connectToPeer({
     required String ipAddress,
     required int port,
@@ -128,60 +142,78 @@ class ConnectionManager {
     }
     return _connecting.putIfAbsent(
       deviceId,
-      () => _connect(ipAddress: ipAddress, port: port, deviceId: deviceId)
-          .whenComplete(() => _connecting.remove(deviceId)),
+      () => _connect(
+        ipAddress: ipAddress,
+        port: port,
+        expectedDeviceId: deviceId,
+      ).then((_) {}).whenComplete(() => _connecting.remove(deviceId)),
     );
   }
 
-  Future<void> _connect({
+  /// Connect to a phone by its IP address when its identity is not known yet.
+  /// Returns the verified device ID of the other phone.
+  Future<String> connectToAddress({
     required String ipAddress,
     required int port,
-    required String deviceId,
+  }) {
+    final key = '$ipAddress:$port';
+    return _connectingAddresses.putIfAbsent(
+      key,
+      () => _connect(ipAddress: ipAddress, port: port)
+          .whenComplete(() => _connectingAddresses.remove(key)),
+    );
+  }
+
+  Future<String> _connect({
+    required String ipAddress,
+    required int port,
+    String? expectedDeviceId,
   }) async {
+    _logger.i('Connecting to $ipAddress:$port ...');
+
+    final Socket socket;
     try {
-      final socket = await Socket.connect(
+      socket = await Socket.connect(
         ipAddress,
         port,
-        timeout: const Duration(seconds: 10),
+        timeout: const Duration(seconds: 8),
       );
+    } catch (e) {
+      _logger.w('TCP connection to $ipAddress:$port failed: $e');
+      rethrow;
+    }
 
-      _logger.i('Connected to $ipAddress:$port ($deviceId)');
+    _logger.i('TCP connected to $ipAddress:$port, starting secure handshake');
 
-      final connection = _PeerConnection(
-        socket: socket,
-        remoteAddress: '$ipAddress:$port',
-        isOutgoing: true,
-        expectedDeviceId: deviceId,
-      );
-      _attach(connection);
+    final connection = _PeerConnection(
+      socket: socket,
+      remoteAddress: '$ipAddress:$port',
+      isOutgoing: true,
+      expectedDeviceId: expectedDeviceId,
+    );
+    _attach(connection);
 
+    try {
       await (connection.helloSending ??= _sendHello(connection));
       final ok = await connection.ready.future.timeout(
         const Duration(seconds: HANDSHAKE_TIMEOUT_SECONDS),
         onTimeout: () => false,
       );
       if (!ok) {
-        _removeConnection(connection);
-        throw Exception('Secure handshake with $deviceId failed');
+        throw Exception(
+            'Secure handshake with $ipAddress failed (different app version, or the security key changed)');
       }
 
-      // Encrypted handshake notice (kept for compatibility)
-      await sendMessage(
-        message: NetworkMessage(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          senderId: _localDeviceId ?? 'unknown',
-          receiverId: deviceId,
-          type: MessageType.discovery,
-          content: 'handshake',
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-          metadata: {'deviceId': _localDeviceId},
-        ),
-        deviceId: deviceId,
-      );
+      final remoteId = connection.remoteDeviceId!;
+      _logger.i('Secure session established with $remoteId at $ipAddress');
 
-      _startHeartbeat(deviceId);
+      // Introduce ourselves (name, device, port)
+      await _sendHandshake(connection);
+      _startHeartbeat(remoteId);
+      return remoteId;
     } catch (e) {
-      _logger.e('Failed to connect to $ipAddress:$port: $e');
+      _removeConnection(connection);
+      _logger.w('Connection to $ipAddress:$port failed: $e');
       rethrow;
     }
   }
@@ -192,6 +224,36 @@ class ConnectionManager {
     c.localHello = hello;
     final payload = [_tagHello, ...utf8.encode(jsonEncode(hello.json))];
     c.socket.add(_frame(payload));
+    await c.socket.flush();
+  }
+
+  /// Tell the other phone who we are (once per connection)
+  Future<void> _sendHandshake(_PeerConnection c) async {
+    if (c.handshakeSent) return;
+    c.handshakeSent = true;
+
+    final message = NetworkMessage(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      senderId: _localDeviceId ?? 'unknown',
+      receiverId: c.remoteDeviceId ?? 'unknown',
+      type: MessageType.discovery,
+      content: 'handshake',
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      metadata: {
+        'deviceId': _localDeviceId,
+        'username': _localUsername ?? 'Unknown',
+        'deviceName': _localDeviceName ?? 'Unknown Device',
+        'port': SERVER_PORT,
+      },
+    );
+    await _sendOn(c, message);
+  }
+
+  Future<void> _sendOn(_PeerConnection c, NetworkMessage message) async {
+    final keys = c.keys;
+    if (keys == null) throw Exception('Secure session is not ready');
+    final cipher = await _crypto.encrypt(keys.send, message.encode());
+    c.socket.add(_frame([_tagData, ...cipher]));
     await c.socket.flush();
   }
 
@@ -207,10 +269,7 @@ class ConnectionManager {
         throw Exception('No active connection to $deviceId');
       }
 
-      final cipher = await _crypto.encrypt(connection.keys!.send, message.encode());
-      connection.socket.add(_frame([_tagData, ...cipher]));
-      await connection.socket.flush();
-
+      await _sendOn(connection, message);
       _logger.d('Message sent to $deviceId (${message.type})');
     } catch (e) {
       _logger.e('Failed to send message to $deviceId: $e');
@@ -297,8 +356,42 @@ class ConnectionManager {
       return;
     }
 
+    // Peer introductions are handled here, not passed on as chat traffic
+    if (message.type == MessageType.discovery && message.content == 'handshake') {
+      await _onHandshake(c, message);
+      return;
+    }
+
     _logger.d('Message received from ${c.remoteDeviceId}: ${message.type}');
     _notifyMessageCallbacks(message);
+  }
+
+  /// The other phone told us who it is
+  Future<void> _onHandshake(_PeerConnection c, NetworkMessage message) async {
+    final info = Map<String, dynamic>.from(message.metadata ?? {});
+    final deviceId = c.remoteDeviceId;
+    if (deviceId == null) return;
+    final ip = c.socket.remoteAddress.address;
+
+    _logger.i('Introduction from ${info['username'] ?? deviceId} at $ip');
+
+    for (final callback in List<HandshakeCallback>.of(_handshakeCallbacks)) {
+      try {
+        callback(deviceId, ip, info);
+      } catch (e) {
+        _logger.e('Error in handshake callback: $e');
+      }
+    }
+
+    // Answer with our own introduction and keep the link alive
+    if (!c.handshakeSent) {
+      try {
+        await _sendHandshake(c);
+      } catch (e) {
+        _logger.w('Could not send introduction to $deviceId: $e');
+      }
+    }
+    if (!c.isOutgoing) _startHeartbeat(deviceId);
   }
 
   /// Verify the peer's hello, pin its key, and derive session keys
@@ -356,6 +449,7 @@ class ConnectionManager {
     if (id != null && identical(_connections[id], connection)) {
       _connections.remove(id);
       _heartbeatTimers.remove(id)?.cancel();
+      _logger.i('Connection to $id closed');
     }
     connection.handshakeTimer?.cancel();
     connection.subscription?.cancel();
@@ -419,6 +513,11 @@ class ConnectionManager {
     _messageCallbacks.remove(callback);
   }
 
+  /// Be told when a connected peer introduces itself
+  void addHandshakeCallback(HandshakeCallback callback) {
+    _handshakeCallbacks.add(callback);
+  }
+
   /// Notify all callbacks of received message
   void _notifyMessageCallbacks(NetworkMessage message) {
     for (final callback in _messageCallbacks) {
@@ -458,6 +557,7 @@ class ConnectionManager {
       }
       _connections.clear();
       _connecting.clear();
+      _connectingAddresses.clear();
       if (_isInitialized) await _serverSocket.close();
       _isInitialized = false;
       _logger.i('Connection manager shutdown');
@@ -474,6 +574,7 @@ class _PeerConnection {
   final bool isOutgoing;
   final String? expectedDeviceId;
   String? remoteDeviceId;
+  bool handshakeSent = false;
 
   final List<int> buffer = <int>[];
   final Completer<bool> ready = Completer<bool>();

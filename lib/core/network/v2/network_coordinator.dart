@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:lantern/core/database/database_service.dart';
 import 'package:logger/logger.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'models/network_models.dart';
 import 'services/discovery_service.dart';
 import 'services/connection_manager.dart';
@@ -14,9 +15,24 @@ import 'services/network_monitor.dart';
 import 'services/crypto_service.dart';
 import 'services/outbox_service.dart';
 
+/// Result of adding a phone by its IP address.
+class ManualConnectResult {
+  final bool ok;
+  final String message;
+  const ManualConnectResult(this.ok, this.message);
+}
+
+class _Address {
+  final String ip;
+  final int port;
+  const _Address(this.ip, this.port);
+}
+
 class NetworkServiceCoordinator {
   static final NetworkServiceCoordinator _instance =
       NetworkServiceCoordinator._internal();
+
+  static const String _lastAddressKey = 'lantern_last_manual_address';
 
   final Logger _logger = Logger();
 
@@ -96,6 +112,7 @@ class NetworkServiceCoordinator {
       await cryptoService.initialize();
       _logger.i('Step 2/5: encryption identity ready (${cryptoService.localFingerprint})');
 
+      connectionManager.setLocalProfile(username: username, deviceName: deviceName);
       await connectionManager.initialize(localDeviceId: deviceId);
       _logger.i('Step 3/5: message server listening on TCP port ${ConnectionManager.SERVER_PORT}');
 
@@ -103,6 +120,9 @@ class NetworkServiceCoordinator {
       _logger.i('Step 4/5: network check: ${networkMonitor.statusMessage}');
 
       final localIp = networkMonitor.getLocalIp() ?? 'unknown';
+
+      // Peers added by address stay online while their connection is alive
+      discoveryService.setConnectionChecker(connectionManager.isConnectedTo);
 
       // Start discovery
       await discoveryService.startDiscovery(
@@ -152,6 +172,120 @@ class NetworkServiceCoordinator {
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Add a phone by its IP address
+  // ---------------------------------------------------------------------
+
+  /// The address another phone can type to reach this one (ip:port).
+  String? get ownAddress {
+    final ip = networkMonitor.getLocalIp();
+    return ip == null ? null : '$ip:${ConnectionManager.SERVER_PORT}';
+  }
+
+  /// Last address that was added successfully (for pre-filling the dialog).
+  Future<String?> lastManualAddress() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(_lastAddressKey);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _Address? _parseAddress(String input) {
+    final text = input.trim();
+    if (text.isEmpty) return null;
+
+    final parts = text.split(':');
+    if (parts.length > 2) return null;
+
+    var port = ConnectionManager.SERVER_PORT;
+    if (parts.length == 2) {
+      final parsed = int.tryParse(parts[1].trim());
+      if (parsed == null || parsed < 1 || parsed > 65535) return null;
+      port = parsed;
+    }
+
+    final octets = parts[0].trim().split('.');
+    if (octets.length != 4) return null;
+    final numbers = <int>[];
+    for (final o in octets) {
+      final n = int.tryParse(o);
+      if (n == null || n < 0 || n > 255) return null;
+      numbers.add(n);
+    }
+    final ip = numbers.join('.');
+    if (ip == '0.0.0.0' || ip == '255.255.255.255' || numbers[0] == 127) {
+      return null;
+    }
+    return _Address(ip, port);
+  }
+
+  String _friendlyConnectError(Object error, String ip) {
+    final text = error.toString().toLowerCase();
+    if (error is TimeoutException || text.contains('timed out')) {
+      return 'No answer from $ip. Check the address, and that LANtern is open on that phone and on the same Wi-Fi or hotspot.';
+    }
+    if (text.contains('refused')) {
+      return '$ip answered, but LANtern is not listening there. Open LANtern on that phone first.';
+    }
+    if (text.contains('unreachable') || text.contains('no route')) {
+      return 'Cannot reach $ip from this network. Are both phones on the same Wi-Fi or hotspot?';
+    }
+    if (text.contains('handshake')) {
+      return 'Connected, but the secure handshake failed. Make sure both phones run the same LANtern version.';
+    }
+    return 'Could not connect: $error';
+  }
+
+  /// Connect to a phone by IP address (for example 192.168.43.1).
+  Future<ManualConnectResult> connectManually(String input) async {
+    if (!_initialized) {
+      return const ManualConnectResult(
+          false, 'The network is still starting. Try again in a moment.');
+    }
+
+    final address = _parseAddress(input);
+    if (address == null) {
+      return const ManualConnectResult(
+          false, 'Enter an address like 192.168.43.1 or 192.168.43.1:15555');
+    }
+    if (address.ip == networkMonitor.getLocalIp()) {
+      return const ManualConnectResult(
+          false, 'That is this phone\'s own address. Enter the other phone\'s address.');
+    }
+
+    _logger.i('Add by address requested: ${address.ip}:${address.port}');
+
+    try {
+      final deviceId = await connectionManager.connectToAddress(
+        ipAddress: address.ip,
+        port: address.port,
+      );
+
+      // Wait briefly for the other phone to introduce itself
+      PeerInfo? peer;
+      for (var i = 0; i < 20; i++) {
+        peer = discoveryService.getPeerByDeviceId(deviceId);
+        if (peer != null) break;
+        await Future.delayed(const Duration(milliseconds: 200));
+      }
+
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_lastAddressKey, '${address.ip}:${address.port}');
+      } catch (_) {}
+
+      final who = peer?.username ?? 'the other phone';
+      _logger.i('Added $who at ${address.ip}');
+      return ManualConnectResult(true, 'Connected to $who');
+    } catch (e) {
+      final message = _friendlyConnectError(e, address.ip);
+      _logger.w('Add by address failed: $message');
+      return ManualConnectResult(false, message);
+    }
+  }
+
   /// Setup service callbacks and wiring
   void _setupCallbacks() {
     if (_callbacksSetUp) return;
@@ -160,6 +294,17 @@ class NetworkServiceCoordinator {
     // Connection manager receives messages
     connectionManager.addMessageCallback((message) {
       _handleReceivedMessage(message);
+    });
+
+    // A connected phone told us who it is: show it in the peer list
+    connectionManager.addHandshakeCallback((deviceId, ip, info) {
+      discoveryService.registerPeer(
+        deviceId: deviceId,
+        username: info['username'] is String ? info['username'] as String : 'Unknown',
+        deviceName: info['deviceName'] is String ? info['deviceName'] as String : 'Unknown Device',
+        ipAddress: ip,
+        port: info['port'] is int ? info['port'] as int : ConnectionManager.SERVER_PORT,
+      );
     });
 
     // Saved incoming messages refresh open chats
@@ -188,6 +333,7 @@ class NetworkServiceCoordinator {
           break;
         case DeliveryStatus.failed:
           // Stays in the outbox and is retried when the peer is back
+          _logger.w('Message ${delivery.messageId} could not be delivered yet, will retry');
           _inFlight.remove(delivery.messageId);
           _chatChanges.add(null);
           break;
@@ -205,6 +351,7 @@ class NetworkServiceCoordinator {
 
   /// A message was ACKed: drop it from the outbox and record delivery time
   Future<void> _onDelivered(String messageId) async {
+    _logger.i('Message $messageId delivered');
     await outboxService.remove(messageId);
     try {
       await DatabaseService().database.update(
@@ -251,6 +398,7 @@ class NetworkServiceCoordinator {
 
         case MessageType.text:
         case MessageType.image:
+          _logger.i('Message received from ${message.senderId}');
           _recentReceived[message.id] = DateTime.now();
           messageService.handleReceivedMessage(_restoreOriginalTimestamp(message));
           // Auto-send ACK
@@ -366,6 +514,7 @@ class NetworkServiceCoordinator {
         // Connect to peer if not already connected
         final peer = discoveryService.getPeerByDeviceId(recipientId);
         if (peer != null && !connectionManager.isConnectedTo(recipientId)) {
+          _logger.i('Opening secure connection to ${peer.username} (${peer.ipAddress}:${peer.port})');
           await connectionManager.connectToPeer(
             ipAddress: peer.ipAddress,
             port: peer.port,
@@ -378,6 +527,7 @@ class NetworkServiceCoordinator {
           message: message,
           deviceId: recipientId,
         );
+        _logger.i('Message ${message.id} sent, waiting for confirmation');
       },
     );
   }
@@ -389,6 +539,8 @@ class NetworkServiceCoordinator {
       final due = await outboxService.dueFor(deviceId);
       for (final queued in due) {
         if (_inFlight.contains(queued.id)) continue;
+
+        _logger.i('Resending queued message ${queued.id} to $deviceId');
 
         // Fresh timestamp so the receiver's replay window accepts it; the
         // original time travels in metadata.

@@ -39,6 +39,11 @@ class DiscoveryService {
   final Map<String, PeerInfo> _discoveredPeers = {};
   final List<Function(List<PeerInfo>)> _listeners = [];
 
+  // Peers that introduced themselves over a direct connection. They stay
+  // online as long as that connection is alive, even without UDP broadcasts.
+  final Set<String> _linkedIds = {};
+  bool Function(String deviceId)? _isConnected;
+
   bool _isRunning = false;
   String? _currentDeviceId;
   String? _currentUsername;
@@ -72,6 +77,42 @@ class DiscoveryService {
         lastSendError: _lastSendError,
         targets: List.unmodifiable(_lastTargets),
       );
+
+  /// Lets discovery ask whether a direct connection to a peer is alive.
+  void setConnectionChecker(bool Function(String deviceId) checker) {
+    _isConnected = checker;
+  }
+
+  /// Add or refresh a peer that introduced itself over a direct connection
+  /// (for example one added by IP address).
+  void registerPeer({
+    required String deviceId,
+    required String username,
+    required String deviceName,
+    required String ipAddress,
+    required int port,
+  }) {
+    if (deviceId == _currentDeviceId) return;
+
+    final previous = _discoveredPeers[deviceId];
+    _discoveredPeers[deviceId] = PeerInfo(
+      deviceId: deviceId,
+      username: username,
+      deviceName: deviceName,
+      ipAddress: ipAddress,
+      port: port,
+      lastSeen: DateTime.now().millisecondsSinceEpoch,
+      isOnline: true,
+    );
+    _linkedIds.add(deviceId);
+
+    if (previous == null) {
+      _logger.i('Peer added from direct connection: $username ($ipAddress)');
+    } else if (!previous.isOnline) {
+      _logger.i('Peer back online via direct connection: $username ($ipAddress)');
+    }
+    _notifyListeners();
+  }
 
   /// Start peer discovery service.
   ///
@@ -298,16 +339,36 @@ class DiscoveryService {
     try {
       final now = DateTime.now().millisecondsSinceEpoch;
       final staleDevices = <String>[];
+      final keepAlive = <PeerInfo>[];
 
       _discoveredPeers.forEach((deviceId, peer) {
         final age = now - peer.lastSeen;
         final ageSeconds = age ~/ 1000;
 
         if (ageSeconds > PEER_TIMEOUT_SECONDS && peer.isOnline) {
-          staleDevices.add(deviceId);
-          _logger.i('Peer went offline: ${peer.username} (silent for ${ageSeconds}s)');
+          final linked = _linkedIds.contains(deviceId) &&
+              (_isConnected?.call(deviceId) ?? false);
+          if (linked) {
+            // Still connected directly, so still here
+            keepAlive.add(PeerInfo(
+              deviceId: peer.deviceId,
+              username: peer.username,
+              deviceName: peer.deviceName,
+              ipAddress: peer.ipAddress,
+              port: peer.port,
+              lastSeen: now,
+              isOnline: true,
+            ));
+          } else {
+            staleDevices.add(deviceId);
+            _logger.i('Peer went offline: ${peer.username} (silent for ${ageSeconds}s)');
+          }
         }
       });
+
+      for (final peer in keepAlive) {
+        _discoveredPeers[peer.deviceId] = peer;
+      }
 
       if (staleDevices.isNotEmpty) {
         for (final deviceId in staleDevices) {
@@ -383,6 +444,7 @@ class DiscoveryService {
         _isRunning = false;
       }
       _discoveredPeers.clear();
+      _linkedIds.clear();
       _listeners.clear();
       _logger.i('Discovery service stopped');
     } catch (e) {

@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lantern/core/logging/app_log.dart';
+import 'package:lantern/core/network/v2/network_coordinator.dart';
 
-/// Shows what the app is doing, with a copy button for sharing.
+/// Shows what the app is doing right now, with a copy button for sharing.
 class LogsScreen extends StatefulWidget {
   const LogsScreen({Key? key}) : super(key: key);
 
@@ -14,8 +15,12 @@ enum _LogFilter { info, problems, all }
 
 class _LogsScreenState extends State<LogsScreen> {
   _LogFilter _filter = _LogFilter.info;
+  String _query = '';
 
   bool _show(LogLine line) {
+    if (_query.isNotEmpty && !line.message.toLowerCase().contains(_query)) {
+      return false;
+    }
     switch (_filter) {
       case _LogFilter.all:
         return true;
@@ -50,6 +55,25 @@ class _LogsScreenState extends State<LogsScreen> {
     );
   }
 
+  /// One-line summary of the live state, updated every second.
+  String _liveSummary() {
+    final c = NetworkServiceCoordinator();
+    if (!c.isInitialized) {
+      return c.lastInitError == null
+          ? 'Network is starting...'
+          : 'Network failed to start: ${c.lastInitError}';
+    }
+    final m = c.networkMonitor;
+    final s = c.discoveryService.stats;
+    final network = m.getLocalIp() == null
+        ? m.statusMessage
+        : '${m.lanInterface ?? 'network'} ${m.getLocalIp()}';
+    return '$network\n'
+        'Peers online ${c.discoveryService.onlinePeerCount}, '
+        'secure sessions ${c.connectionManager.connectionCount}\n'
+        'Broadcasts sent ${s.sent}, heard others ${s.received}, heard self ${s.ownReceived}';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -70,8 +94,21 @@ class _LogsScreenState extends State<LogsScreen> {
       ),
       body: Column(
         children: [
+          // Live state
+          Container(
+            width: double.infinity,
+            color: Theme.of(context).colorScheme.surfaceVariant,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: StreamBuilder<int>(
+              stream: Stream.periodic(const Duration(seconds: 1), (i) => i),
+              builder: (context, _) => Text(
+                _liveSummary(),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+          ),
           Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
             child: SegmentedButton<_LogFilter>(
               segments: const [
                 ButtonSegment(value: _LogFilter.info, label: Text('Info')),
@@ -80,6 +117,18 @@ class _LogsScreenState extends State<LogsScreen> {
               ],
               selected: {_filter},
               onSelectionChanged: (s) => setState(() => _filter = s.first),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+            child: TextField(
+              decoration: const InputDecoration(
+                isDense: true,
+                prefixIcon: Icon(Icons.search),
+                hintText: 'Filter, for example peer or handshake',
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (value) => setState(() => _query = value.trim().toLowerCase()),
             ),
           ),
           Expanded(
