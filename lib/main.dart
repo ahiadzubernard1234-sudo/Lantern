@@ -1,14 +1,28 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lantern/core/di/service_locator.dart';
+import 'package:lantern/core/logging/app_log.dart';
 import 'package:lantern/features/app/presentation/pages/app_shell.dart';
 import 'package:lantern/core/theme/app_theme.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await setupServiceLocator();
-  runApp(const ProviderScope(child: LANternApp()));
+void main() {
+  AppLog.install();
+
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+
+    FlutterError.onError = (details) {
+      AppLog.add('error', 'Flutter error: ${details.exceptionAsString()}');
+      FlutterError.presentError(details);
+    };
+
+    await setupServiceLocator();
+    runApp(const ProviderScope(child: LANternApp()));
+  }, (error, stack) {
+    AppLog.add('error', 'Uncaught error: $error');
+  });
 }
 
 class LANternApp extends ConsumerWidget {

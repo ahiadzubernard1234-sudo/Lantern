@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lantern/core/network/v2/network_coordinator.dart';
 import 'package:lantern/core/theme/app_theme.dart';
 import 'package:lantern/features/profile/presentation/providers/profile_provider.dart';
+import 'package:lantern/features/app/presentation/pages/home/logs_screen.dart';
 
 class SettingsTab extends ConsumerWidget {
   const SettingsTab({Key? key}) : super(key: key);
@@ -202,6 +204,18 @@ class SettingsTab extends ConsumerWidget {
                     label: const Text('Network Diagnostics'),
                   ),
                 ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const LogsScreen()),
+                    ),
+                    icon: const Icon(Icons.receipt_long),
+                    label: const Text('View Logs'),
+                  ),
+                ),
               ],
             ),
           ),
@@ -282,6 +296,8 @@ class SettingsTab extends ConsumerWidget {
     );
   }
 
+  String _yesNo(bool? value) => value == null ? 'unknown' : (value ? 'yes' : 'no');
+
   Future<void> _showNetworkDiagnostics(BuildContext context) async {
     final coordinator = NetworkServiceCoordinator();
 
@@ -290,7 +306,9 @@ class SettingsTab extends ConsumerWidget {
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('Network Diagnostics'),
-          content: const Text('The network is still starting. Try again in a moment.'),
+          content: Text(coordinator.lastInitError == null
+              ? 'The network is still starting. Try again in a moment.'
+              : 'The network failed to start:\n${coordinator.lastInitError}'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
@@ -306,6 +324,8 @@ class SettingsTab extends ConsumerWidget {
     final queued = await coordinator.outboxService.pendingCount();
     final network = (diagnostics['network'] as Map?) ?? const {};
     final peers = (diagnostics['peers'] as Map?) ?? const {};
+    final monitor = coordinator.networkMonitor;
+    final stats = coordinator.discoveryService.stats;
 
     if (!context.mounted) return;
     await showDialog(
@@ -317,10 +337,17 @@ class SettingsTab extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _row('Status', '${network['status'] ?? 'unknown'}'.split('.').last),
+              _row('Wi-Fi radio on', _yesNo(monitor.wifiRadioOn)),
+              _row('Interface', monitor.lanInterface ?? 'none'),
               _row('Local IP', '${network['localIp'] ?? 'none'}'),
               _row('Subnet mask', '${network['subnetMask'] ?? 'unknown (using /24)'}'),
               _row('Broadcast', '${network['broadcastAddress'] ?? 'none'}'),
+              _row('Multicast lock held', _yesNo(monitor.multicastLockHeld)),
+              const Divider(),
+              _row('Broadcasts sent', '${stats.sent}'),
+              _row('Heard from others', '${stats.received}'),
+              _row('Heard own broadcast', '${stats.ownReceived}'),
+              _row('Last send error', stats.lastSendError ?? 'none'),
               const Divider(),
               _row('Peers discovered', '${peers['discovered'] ?? 0}'),
               _row('Peers online', '${peers['online'] ?? 0}'),

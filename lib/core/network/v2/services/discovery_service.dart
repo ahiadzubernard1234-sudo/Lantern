@@ -4,6 +4,29 @@ import 'dart:io';
 import 'package:logger/logger.dart';
 import '../models/network_models.dart';
 
+/// Counters that show whether discovery is really working.
+class DiscoveryStats {
+  final bool isRunning;
+  final int sent;
+  final int received;
+  final int ownReceived;
+  final int invalid;
+  final DateTime? lastReceivedAt;
+  final String? lastSendError;
+  final List<String> targets;
+
+  const DiscoveryStats({
+    required this.isRunning,
+    required this.sent,
+    required this.received,
+    required this.ownReceived,
+    required this.invalid,
+    required this.lastReceivedAt,
+    required this.lastSendError,
+    required this.targets,
+  });
+}
+
 class DiscoveryService {
   static final DiscoveryService _instance = DiscoveryService._internal();
   final Logger _logger = Logger();
@@ -23,12 +46,32 @@ class DiscoveryService {
   String? _currentIpAddress;
   String? Function()? _broadcastProvider;
 
+  int _sent = 0;
+  int _received = 0;
+  int _ownReceived = 0;
+  int _invalid = 0;
+  DateTime? _lastReceivedAt;
+  String? _lastSendError;
+  List<String> _lastTargets = [];
+
   static const int DISCOVERY_PORT = 15554;
   static const int BROADCAST_INTERVAL_SECONDS = 5;
   static const int PEER_TIMEOUT_SECONDS = 30;
 
   factory DiscoveryService() => _instance;
   DiscoveryService._internal();
+
+  /// Counters for the status card and diagnostics
+  DiscoveryStats get stats => DiscoveryStats(
+        isRunning: _isRunning,
+        sent: _sent,
+        received: _received,
+        ownReceived: _ownReceived,
+        invalid: _invalid,
+        lastReceivedAt: _lastReceivedAt,
+        lastSendError: _lastSendError,
+        targets: List.unmodifiable(_lastTargets),
+      );
 
   /// Start peer discovery service.
   ///
@@ -58,7 +101,7 @@ class DiscoveryService {
       // Required to send to broadcast addresses
       _discoverySocket.broadcastEnabled = true;
 
-      _logger.i('Discovery socket bound to port $DISCOVERY_PORT');
+      _logger.i('Discovery listening on UDP port $DISCOVERY_PORT');
 
       // Listen for incoming discovery packets
       _socketSubscription = _discoverySocket.listen(
@@ -131,19 +174,35 @@ class DiscoveryService {
       );
 
       final encoded = packet.encode();
-      for (final target in _getBroadcastTargets()) {
+      final targets = _getBroadcastTargets();
+      _lastTargets = targets;
+
+      var okCount = 0;
+      for (final target in targets) {
         try {
-          _discoverySocket.send(
+          final bytes = _discoverySocket.send(
             encoded,
             InternetAddress(target),
             DISCOVERY_PORT,
           );
-          _logger.d('Discovery packet sent to $target:$DISCOVERY_PORT');
+          if (bytes > 0) {
+            okCount++;
+          } else {
+            _lastSendError = 'Nothing sent to $target';
+          }
         } catch (e) {
+          _lastSendError = '$target: $e';
           _logger.w('Failed to send discovery packet to $target: $e');
         }
       }
+
+      _sent++;
+      if (_sent == 1 || _sent % 12 == 0) {
+        _logger.i('Discovery broadcast #$_sent to ${targets.join(', ')} '
+            '($okCount ok). Heard others: $_received, heard self: $_ownReceived');
+      }
     } catch (e) {
+      _lastSendError = e.toString();
       _logger.w('Failed to send discovery packet: $e');
     }
   }
@@ -179,15 +238,32 @@ class DiscoveryService {
       if (packet.type != MessageType.discovery) return;
 
       final metadata = packet.metadata;
-      if (metadata == null) return;
-
-      final deviceId = metadata['deviceId'];
-      if (deviceId is! String || deviceId.isEmpty) return;
-
-      // Ignore own discovery packets
-      if (deviceId == _currentDeviceId) {
+      if (metadata == null) {
+        _invalid++;
         return;
       }
+
+      final deviceId = metadata['deviceId'];
+      if (deviceId is! String || deviceId.isEmpty) {
+        _invalid++;
+        return;
+      }
+
+      // Our own broadcast came back: proves this phone can receive
+      if (deviceId == _currentDeviceId) {
+        if (_ownReceived == 0) {
+          _logger.i('Heard our own broadcast: this phone can receive discovery packets');
+        }
+        _ownReceived++;
+        return;
+      }
+
+      if (_received == 0) {
+        _logger.i('First discovery packet from another phone: '
+            '${datagram.address.address}');
+      }
+      _received++;
+      _lastReceivedAt = DateTime.now();
 
       // Use the real source address, not the one the packet claims.
       // (Identity is verified later by the encrypted handshake.)
@@ -205,14 +281,15 @@ class DiscoveryService {
       _discoveredPeers[deviceId] = peer;
 
       if (previousPeer == null) {
-        _logger.d('New peer discovered: ${peer.username} (${peer.ipAddress})');
-      } else {
-        _logger.d('Peer updated: ${peer.username}');
+        _logger.i('New peer discovered: ${peer.username} (${peer.ipAddress})');
+      } else if (!previousPeer.isOnline) {
+        _logger.i('Peer back online: ${peer.username} (${peer.ipAddress})');
       }
 
       _notifyListeners();
     } catch (e) {
-      _logger.w('Error parsing discovery packet: $e');
+      _invalid++;
+      _logger.w('Error parsing discovery packet from ${datagram.address.address}: $e');
     }
   }
 
@@ -228,7 +305,7 @@ class DiscoveryService {
 
         if (ageSeconds > PEER_TIMEOUT_SECONDS && peer.isOnline) {
           staleDevices.add(deviceId);
-          _logger.d('Peer timeout: ${peer.username} (${ageSeconds}s)');
+          _logger.i('Peer went offline: ${peer.username} (silent for ${ageSeconds}s)');
         }
       });
 

@@ -25,7 +25,11 @@ class NetworkServiceCoordinator {
   late String _deviceName;
 
   bool _initialized = false;
-  late Timer _maintenanceTimer;
+  bool _initializing = false;
+  String? _lastInitError;
+  Map<String, String>? _initArgs;
+  Timer? _maintenanceTimer;
+  bool _callbacksSetUp = false;
   StreamSubscription<TrustAlert>? _trustAlertSub;
 
   // Messages currently being sent, and peers whose outbox is being flushed
@@ -60,29 +64,44 @@ class NetworkServiceCoordinator {
   /// Emits whenever a conversation may need to be reloaded.
   Stream<void> get chatChanges => _chatChanges.stream;
 
+  /// Why the last start-up attempt failed (null if it did not fail).
+  String? get lastInitError => _lastInitError;
+
   /// Initialize all services
   Future<void> initialize({
     required String deviceId,
     required String username,
     required String deviceName,
   }) async {
-    if (_initialized) return;
+    if (_initialized || _initializing) return;
+    _initializing = true;
+    _initArgs = {
+      'deviceId': deviceId,
+      'username': username,
+      'deviceName': deviceName,
+    };
 
     try {
       _deviceId = deviceId;
       _username = username;
       _deviceName = deviceName;
+      _lastInitError = null;
 
-      _logger.i('Initializing network services...');
+      _logger.i('Starting network services as "$username" ($deviceName)');
 
       // Initialize services in order
       await securityService.initialize(deviceId: deviceId);
-      await cryptoService.initialize();
-      await connectionManager.initialize(localDeviceId: deviceId);
-      await networkMonitor.startMonitoring();
+      _logger.i('Step 1/5: security service ready');
 
-      // Wait for local IP
-      await Future.delayed(const Duration(milliseconds: 500));
+      await cryptoService.initialize();
+      _logger.i('Step 2/5: encryption identity ready (${cryptoService.localFingerprint})');
+
+      await connectionManager.initialize(localDeviceId: deviceId);
+      _logger.i('Step 3/5: message server listening on TCP port ${ConnectionManager.SERVER_PORT}');
+
+      await networkMonitor.startMonitoring();
+      _logger.i('Step 4/5: network check: ${networkMonitor.statusMessage}');
+
       final localIp = networkMonitor.getLocalIp() ?? 'unknown';
 
       // Start discovery
@@ -93,11 +112,13 @@ class NetworkServiceCoordinator {
         ipAddress: localIp,
         broadcastAddressProvider: networkMonitor.getBroadcastAddress,
       );
+      _logger.i('Step 5/5: peer discovery started');
 
       // Setup callbacks
       _setupCallbacks();
 
       // Start maintenance timer
+      _maintenanceTimer?.cancel();
       _maintenanceTimer = Timer.periodic(
         const Duration(seconds: 60),
         (_) => _performMaintenance(),
@@ -106,13 +127,36 @@ class NetworkServiceCoordinator {
       _initialized = true;
       _logger.i('Network services initialized successfully');
     } catch (e) {
+      _lastInitError = e.toString();
       _logger.e('Failed to initialize network services: $e');
       rethrow;
+    } finally {
+      _initializing = false;
+    }
+  }
+
+  /// Try starting the network again after a failure
+  Future<void> retryInitialize() async {
+    if (_initialized || _initializing) return;
+    final args = _initArgs;
+    if (args == null) return;
+    _logger.i('Retrying network start-up');
+    try {
+      await initialize(
+        deviceId: args['deviceId']!,
+        username: args['username']!,
+        deviceName: args['deviceName']!,
+      );
+    } catch (_) {
+      // Already logged and stored in lastInitError
     }
   }
 
   /// Setup service callbacks and wiring
   void _setupCallbacks() {
+    if (_callbacksSetUp) return;
+    _callbacksSetUp = true;
+
     // Connection manager receives messages
     connectionManager.addMessageCallback((message) {
       _handleReceivedMessage(message);
@@ -303,7 +347,7 @@ class NetworkServiceCoordinator {
 
       _dispatch(message);
 
-      _logger.d('Message sent to $recipientId');
+      _logger.i('Message queued for $recipientId');
     } catch (e) {
       _logger.e('Failed to send message: $e');
       rethrow;
@@ -455,7 +499,7 @@ class NetworkServiceCoordinator {
   /// Shutdown all services
   Future<void> shutdown() async {
     try {
-      if (_initialized) _maintenanceTimer.cancel();
+      _maintenanceTimer?.cancel();
       await _trustAlertSub?.cancel();
       _trustAlertSub = null;
 
@@ -473,6 +517,7 @@ class NetworkServiceCoordinator {
       _recentReceived.clear();
 
       _initialized = false;
+      _callbacksSetUp = false;
       _logger.i('Network services shutdown complete');
     } catch (e) {
       _logger.e('Error during shutdown: $e');
