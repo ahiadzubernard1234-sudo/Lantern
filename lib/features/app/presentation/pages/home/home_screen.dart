@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lantern/core/network/v2/services/conversation_service.dart';
+import 'package:lantern/features/app/presentation/pages/home/tabs/chats_tab.dart';
 import 'package:lantern/features/app/presentation/pages/home/tabs/peers_tab.dart';
 import 'package:lantern/features/app/presentation/pages/home/tabs/channels_tab.dart';
 import 'package:lantern/features/app/presentation/pages/home/tabs/settings_tab.dart';
@@ -15,8 +17,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   int _selectedIndex = 0;
 
   @override
+  void initState() {
+    super.initState();
+    // Remember names of people we meet, so their chats keep a name offline
+    ConversationService().startRemembering();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final screens = [
+      ChatsTab(onFindPeople: () => setState(() => _selectedIndex = 1)),
       const PeersTab(),
       const ChannelsTab(),
       const SettingsTab(),
@@ -34,6 +44,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           setState(() => _selectedIndex = index);
         },
         destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.chat_bubble_outline),
+            selectedIcon: Icon(Icons.chat_bubble),
+            label: 'Chats',
+          ),
           NavigationDestination(
             icon: Icon(Icons.people),
             label: 'Peers',
