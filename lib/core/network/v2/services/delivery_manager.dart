@@ -22,6 +22,11 @@ class DeliveryManager {
     required String recipientId,
     required Future<void> Function() sendFunction,
   }) {
+    if (_pendingMessages.containsKey(message.id)) {
+      _logger.d('Message ${message.id} is already being delivered');
+      return;
+    }
+
     final pending = _PendingDelivery(
       messageId: message.id,
       recipientId: recipientId,
@@ -36,10 +41,33 @@ class DeliveryManager {
     _sendWithRetry(message.id);
   }
 
+  /// Forget a message, but only if it is still the one we are tracking
+  void _removePending(_PendingDelivery pending) {
+    if (identical(_pendingMessages[pending.messageId], pending)) {
+      _pendingMessages.remove(pending.messageId);
+    }
+  }
+
+  void _finishDelivered(_PendingDelivery pending) {
+    _updateDeliveryStatus(
+      messageId: pending.messageId,
+      recipientId: pending.recipientId,
+      status: DeliveryStatus.delivered,
+    );
+    _removePending(pending);
+    _logger.d('Message delivered: ${pending.messageId}');
+  }
+
   /// Send message with retry logic
   Future<void> _sendWithRetry(String messageId) async {
     final pending = _pendingMessages[messageId];
     if (pending == null) return;
+
+    // An ACK already arrived (for example a late one from an earlier try)
+    if (pending.acked) {
+      _finishDelivered(pending);
+      return;
+    }
 
     if (pending.retryCount >= MAX_RETRIES) {
       _updateDeliveryStatus(
@@ -47,12 +75,16 @@ class DeliveryManager {
         recipientId: pending.recipientId,
         status: DeliveryStatus.failed,
       );
-      _pendingMessages.remove(messageId);
-      _logger.w('Message delivery failed after $MAX_RETRIES retries: $messageId');
+      _removePending(pending);
+      _logger.w('Message delivery failed after $MAX_RETRIES tries: $messageId');
       return;
     }
 
     try {
+      // Create the waiter BEFORE sending, so a very fast ACK is never missed
+      final completer = Completer<bool>();
+      pending.ackCompleter = completer;
+
       // Send message
       await pending.sendFunction();
 
@@ -64,26 +96,18 @@ class DeliveryManager {
       );
 
       // Wait for ACK with timeout
-      pending.ackCompleter = Completer<bool>();
-      final ackReceived = await pending.ackCompleter!.future
-          .timeout(
+      final ackReceived = pending.acked ||
+          await completer.future.timeout(
             const Duration(seconds: ACK_TIMEOUT_SECONDS),
             onTimeout: () => false,
-          )
-          .catchError((_) => false);
+          );
 
-      if (ackReceived) {
-        _updateDeliveryStatus(
-          messageId: messageId,
-          recipientId: pending.recipientId,
-          status: DeliveryStatus.delivered,
-        );
-        _pendingMessages.remove(messageId);
-        _logger.d('Message delivered: $messageId');
+      if (ackReceived || pending.acked) {
+        _finishDelivered(pending);
       } else {
         // ACK timeout, retry
         pending.retryCount++;
-        _logger.d('ACK timeout for $messageId, retrying (${pending.retryCount}/$MAX_RETRIES)');
+        _logger.w('No ACK for $messageId, retrying (${pending.retryCount}/$MAX_RETRIES)');
 
         // Wait before retry
         await Future.delayed(
@@ -94,7 +118,7 @@ class DeliveryManager {
       }
     } catch (e) {
       pending.retryCount++;
-      _logger.w('Error sending message $messageId: $e, retrying...');
+      _logger.w('Error sending message $messageId: $e (try ${pending.retryCount}/$MAX_RETRIES)');
 
       await Future.delayed(
         Duration(seconds: RETRY_DELAY_SECONDS * pending.retryCount),
@@ -107,10 +131,16 @@ class DeliveryManager {
   /// Handle ACK receipt
   void handleAck(String messageId, String senderId) {
     final pending = _pendingMessages[messageId];
-    if (pending != null && !pending.ackCompleter!.isCompleted) {
-      pending.ackCompleter!.complete(true);
-      _logger.d('ACK received for message: $messageId from $senderId');
+    if (pending == null) {
+      _logger.d('ACK for $messageId from $senderId (not being tracked)');
+      return;
     }
+    pending.acked = true;
+    final waiter = pending.ackCompleter;
+    if (waiter != null && !waiter.isCompleted) {
+      waiter.complete(true);
+    }
+    _logger.i('ACK received for message $messageId from $senderId');
   }
 
   /// Send ACK for received message
@@ -120,15 +150,6 @@ class DeliveryManager {
     required Future<void> Function() sendFunction,
   }) async {
     try {
-      final ack = NetworkMessage(
-        id: '$messageId-ack',
-        senderId: recipientId,
-        receiverId: recipientId,
-        type: MessageType.ack,
-        content: messageId,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-      );
-
       await sendFunction();
       _logger.d('ACK sent for message: $messageId');
     } catch (e) {
@@ -179,6 +200,8 @@ class DeliveryManager {
   }) {
     final pending = _pendingMessages[messageId];
     if (pending != null) {
+      pending.status = status;
+
       final delivery = MessageDelivery(
         messageId: messageId,
         recipientId: recipientId,
@@ -267,6 +290,7 @@ class _PendingDelivery {
 
   DeliveryStatus status = DeliveryStatus.pending;
   int retryCount = 0;
+  bool acked = false;
   Completer<bool>? ackCompleter;
 
   _PendingDelivery({

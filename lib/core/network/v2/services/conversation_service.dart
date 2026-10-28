@@ -5,7 +5,10 @@ import '../models/network_models.dart';
 import 'discovery_service.dart';
 
 /// Delivery state of a message as shown in the chat UI.
-enum ChatStatus { queued, sent, delivered }
+///
+/// queued: just sent, waiting for confirmation.
+/// failed: still not confirmed after a while (peer offline or unreachable).
+enum ChatStatus { queued, failed, sent, delivered }
 
 /// A chat message ready to display.
 class ChatMessage {
@@ -48,6 +51,9 @@ class ConversationService {
   ConversationService._internal();
 
   final Logger _logger = Logger();
+
+  /// A message not confirmed after this long is shown as not delivered yet.
+  static const Duration failedAfter = Duration(seconds: 20);
 
   bool _remembering = false;
   final Map<String, String> _savedPeers = {};
@@ -176,14 +182,18 @@ class ConversationService {
         LIMIT ?
       ''', [myId, peerId, peerId, myId, limit]);
 
+      final now = DateTime.now();
       return rows.map((r) {
         final mine = r['sender_id'] == myId;
+        final created = DateTime.tryParse(r['created_at'] as String) ?? now;
         var status = ChatStatus.delivered;
         if (mine) {
           if (r['delivered_at'] != null) {
             status = ChatStatus.delivered;
           } else if (((r['queued'] as int?) ?? 0) == 1) {
-            status = ChatStatus.queued;
+            status = now.difference(created) > failedAfter
+                ? ChatStatus.failed
+                : ChatStatus.queued;
           } else {
             status = ChatStatus.sent;
           }
@@ -192,7 +202,7 @@ class ConversationService {
           id: r['id'] as String,
           text: r['content'] as String,
           isMine: mine,
-          time: DateTime.tryParse(r['created_at'] as String) ?? DateTime.now(),
+          time: created,
           status: status,
         );
       }).toList();

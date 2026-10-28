@@ -78,12 +78,41 @@ class OutboxService {
     }
   }
 
+  /// Make a waiting message due right now. Returns who it is for, or null if
+  /// it is not waiting any more.
+  Future<String?> retryNow(String id) async {
+    try {
+      final rows = await _db.query('outbox',
+          columns: ['receiver_id'], where: 'id = ?', whereArgs: [id], limit: 1);
+      if (rows.isEmpty) return null;
+      await _db.update('outbox', {'last_attempt': 0, 'attempts': 1},
+          where: 'id = ?', whereArgs: [id]);
+      return rows.first['receiver_id'] as String;
+    } catch (e) {
+      _logger.e('Outbox retry failed: $e');
+      return null;
+    }
+  }
+
   /// Remove a delivered message.
   Future<void> remove(String id) async {
     try {
       await _db.delete('outbox', where: 'id = ?', whereArgs: [id]);
     } catch (e) {
       _logger.e('Outbox remove failed: $e');
+    }
+  }
+
+  /// Remove a message because [receiverId] confirmed it. A confirmation from
+  /// anyone else is ignored.
+  Future<bool> removeConfirmedBy(String id, String receiverId) async {
+    try {
+      final removed = await _db.delete('outbox',
+          where: 'id = ? AND receiver_id = ?', whereArgs: [id, receiverId]);
+      return removed > 0;
+    } catch (e) {
+      _logger.e('Outbox remove failed: $e');
+      return false;
     }
   }
 

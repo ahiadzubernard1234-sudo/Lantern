@@ -45,7 +45,12 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     }
 
-    _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) => _refreshStatus());
+    // Also refresh on a timer so a waiting message can switch to "not
+    // delivered" even when nothing else happens
+    _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _refreshStatus();
+      _reload();
+    });
     _reload();
     _refreshStatus();
   }
@@ -99,6 +104,14 @@ class _ChatScreenState extends State<ChatScreen> {
         SnackBar(content: Text('Could not send: $e')),
       );
     }
+    _reload();
+  }
+
+  Future<void> _retry(ChatMessage message) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Trying again...')),
+    );
+    await _coordinator.retryMessage(message.id);
     _reload();
   }
 
@@ -186,7 +199,15 @@ class _ChatScreenState extends State<ChatScreen> {
                     reverse: true,
                     padding: const EdgeInsets.all(12),
                     itemCount: _messages.length,
-                    itemBuilder: (context, index) => _Bubble(message: _messages[index]),
+                    itemBuilder: (context, index) {
+                      final message = _messages[index];
+                      return _Bubble(
+                        message: message,
+                        onRetry: message.status == ChatStatus.failed
+                            ? () => _retry(message)
+                            : null,
+                      );
+                    },
                   ),
           ),
           SafeArea(
@@ -228,20 +249,25 @@ class _ChatScreenState extends State<ChatScreen> {
 
 class _Bubble extends StatelessWidget {
   final ChatMessage message;
+  final VoidCallback? onRetry;
 
-  const _Bubble({required this.message});
+  const _Bubble({required this.message, this.onRetry});
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final mine = message.isMine;
     final time = TimeOfDay.fromDateTime(message.time).format(context);
+    final failed = message.status == ChatStatus.failed;
 
     IconData? statusIcon;
     if (mine) {
       switch (message.status) {
         case ChatStatus.queued:
           statusIcon = Icons.schedule;
+          break;
+        case ChatStatus.failed:
+          statusIcon = Icons.error_outline;
           break;
         case ChatStatus.sent:
           statusIcon = Icons.done;
@@ -254,45 +280,59 @@ class _Bubble extends StatelessWidget {
 
     final fg = mine ? scheme.onPrimaryContainer : scheme.onSurfaceVariant;
 
-    return Align(
-      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.78,
-        ),
-        decoration: BoxDecoration(
-          color: mine ? scheme.primaryContainer : scheme.surfaceVariant,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(16),
-            topRight: const Radius.circular(16),
-            bottomLeft: Radius.circular(mine ? 16 : 4),
-            bottomRight: Radius.circular(mine ? 4 : 16),
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(message.text, style: TextStyle(color: fg)),
-            ),
-            const SizedBox(height: 2),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(time, style: TextStyle(fontSize: 11, color: fg.withOpacity(0.7))),
-                if (statusIcon != null) ...[
-                  const SizedBox(width: 4),
-                  Icon(statusIcon, size: 14, color: fg.withOpacity(0.7)),
-                ],
-              ],
-            ),
-          ],
+    final bubble = Container(
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.of(context).size.width * 0.78,
+      ),
+      decoration: BoxDecoration(
+        color: mine ? scheme.primaryContainer : scheme.surfaceVariant,
+        borderRadius: BorderRadius.only(
+          topLeft: const Radius.circular(16),
+          topRight: const Radius.circular(16),
+          bottomLeft: Radius.circular(mine ? 16 : 4),
+          bottomRight: Radius.circular(mine ? 4 : 16),
         ),
       ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(message.text, style: TextStyle(color: fg)),
+          ),
+          const SizedBox(height: 2),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(time, style: TextStyle(fontSize: 11, color: fg.withOpacity(0.7))),
+              if (statusIcon != null) ...[
+                const SizedBox(width: 4),
+                Icon(
+                  statusIcon,
+                  size: 14,
+                  color: failed ? Colors.red.shade700 : fg.withOpacity(0.7),
+                ),
+              ],
+            ],
+          ),
+          if (failed)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                'Not delivered yet. Tap to retry.',
+                style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+              ),
+            ),
+        ],
+      ),
+    );
+
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: onRetry == null ? bubble : GestureDetector(onTap: onRetry, child: bubble),
     );
   }
 }

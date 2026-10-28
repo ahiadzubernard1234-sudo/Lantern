@@ -329,7 +329,7 @@ class NetworkServiceCoordinator {
         case DeliveryStatus.delivered:
         case DeliveryStatus.read:
           _inFlight.remove(delivery.messageId);
-          unawaited(_onDelivered(delivery.messageId));
+          unawaited(_confirmDelivery(delivery.messageId, null));
           break;
         case DeliveryStatus.failed:
           // Stays in the outbox and is retried when the peer is back
@@ -349,19 +349,35 @@ class NetworkServiceCoordinator {
     });
   }
 
-  /// A message was ACKed: drop it from the outbox and record delivery time
-  Future<void> _onDelivered(String messageId) async {
-    _logger.i('Message $messageId delivered');
-    await outboxService.remove(messageId);
+  /// A message was confirmed as delivered. [fromDeviceId] is the phone that
+  /// confirmed it; null means the delivery manager already checked it.
+  Future<void> _confirmDelivery(String messageId, String? fromDeviceId) async {
     try {
-      await DatabaseService().database.update(
-        'messages',
-        {'delivered_at': DateTime.now().toIso8601String()},
-        where: 'id = ? AND delivered_at IS NULL',
-        whereArgs: [messageId],
-      );
+      final db = DatabaseService().database;
+
+      if (fromDeviceId != null) {
+        // Only the intended receiver can confirm a message
+        final removed = await outboxService.removeConfirmedBy(messageId, fromDeviceId);
+        await db.update(
+          'messages',
+          {'delivered_at': DateTime.now().toIso8601String()},
+          where: 'id = ? AND receiver_id = ? AND delivered_at IS NULL',
+          whereArgs: [messageId, fromDeviceId],
+        );
+        if (removed) _logger.i('Message $messageId delivered');
+      } else {
+        await outboxService.remove(messageId);
+        await db.update(
+          'messages',
+          {'delivered_at': DateTime.now().toIso8601String()},
+          where: 'id = ? AND delivered_at IS NULL',
+          whereArgs: [messageId],
+        );
+        _logger.i('Message $messageId delivered');
+      }
+      _inFlight.remove(messageId);
     } catch (e) {
-      _logger.w('Could not record delivery time: $e');
+      _logger.w('Could not record delivery of $messageId: $e');
     }
     _chatChanges.add(null);
   }
@@ -376,13 +392,14 @@ class NetworkServiceCoordinator {
       if (isChat &&
           message.receiverId == _deviceId &&
           _recentReceived.containsKey(message.id)) {
+        _logger.i('Duplicate of message ${message.id}, confirming again');
         _sendAck(message);
         return;
       }
 
       // Validate packet
       if (!securityService.validatePacket(message)) {
-        _logger.w('Invalid packet received: ${message.id}');
+        _logger.w('Rejected ${message.type} packet ${message.id} from ${message.senderId}');
         return;
       }
 
@@ -393,12 +410,15 @@ class NetworkServiceCoordinator {
           break;
 
         case MessageType.ack:
+          _logger.i('Confirmation received for ${message.content} from ${message.senderId}');
           deliveryManager.handleAck(message.content, message.senderId);
+          // Also settle it directly, even if the delivery manager has given up
+          unawaited(_confirmDelivery(message.content, message.senderId));
           break;
 
         case MessageType.text:
         case MessageType.image:
-          _logger.i('Message received from ${message.senderId}');
+          _logger.i('Message ${message.id} received from ${message.senderId}');
           _recentReceived[message.id] = DateTime.now();
           messageService.handleReceivedMessage(_restoreOriginalTimestamp(message));
           // Auto-send ACK
@@ -446,10 +466,14 @@ class NetworkServiceCoordinator {
   Future<void> _sendAck(NetworkMessage message) async {
     try {
       // Only ACK if we're the receiver
-      if (message.receiverId != _deviceId) return;
+      if (message.receiverId != _deviceId) {
+        _logger.w('Not confirming ${message.id}: addressed to ${message.receiverId}, we are $_deviceId');
+        return;
+      }
 
+      // Every confirmation gets its own ID, so a repeat is not mistaken for a replay
       final ack = NetworkMessage(
-        id: '${message.id}-ack',
+        id: '${message.id}-ack-${DateTime.now().millisecondsSinceEpoch}',
         senderId: _deviceId,
         receiverId: message.senderId,
         type: MessageType.ack,
@@ -461,8 +485,9 @@ class NetworkServiceCoordinator {
         message: ack,
         deviceId: message.senderId,
       );
+      _logger.i('Confirmation sent for ${message.id} to ${message.senderId}');
     } catch (e) {
-      _logger.w('Failed to send ACK: $e');
+      _logger.w('Failed to send confirmation for ${message.id}: $e');
     }
   }
 
@@ -495,11 +520,22 @@ class NetworkServiceCoordinator {
 
       _dispatch(message);
 
-      _logger.i('Message queued for $recipientId');
+      _logger.i('Message ${message.id} queued for $recipientId');
     } catch (e) {
       _logger.e('Failed to send message: $e');
       rethrow;
     }
+  }
+
+  /// Try a waiting message again right now (the user tapped it).
+  Future<void> retryMessage(String messageId) async {
+    final peerId = await outboxService.retryNow(messageId);
+    if (peerId == null) {
+      _logger.w('Message $messageId is not waiting for delivery');
+      return;
+    }
+    _logger.i('Manual retry of message $messageId');
+    await _flushOutboxFor(peerId);
   }
 
   /// Hand a message to the delivery manager (ACK tracking and retries)
@@ -513,6 +549,9 @@ class NetworkServiceCoordinator {
       sendFunction: () async {
         // Connect to peer if not already connected
         final peer = discoveryService.getPeerByDeviceId(recipientId);
+        if (peer == null) {
+          _logger.w('Recipient $recipientId has not been seen on the network');
+        }
         if (peer != null && !connectionManager.isConnectedTo(recipientId)) {
           _logger.i('Opening secure connection to ${peer.username} (${peer.ipAddress}:${peer.port})');
           await connectionManager.connectToPeer(
